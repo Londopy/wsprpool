@@ -6,9 +6,18 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ._demod import FS, noise_power, peaks, soft_bits, spectrum, sync_score, tone_sums
+from ._demod import (
+    FS,
+    noise_power,
+    peaks,
+    soft_bits,
+    spectrum,
+    subtract,
+    sync_score,
+    tone_sums,
+)
 from ._fano import fano
-from ._wspr import Message, deinterleave, unpack
+from ._wspr import Message, deinterleave, symbols, unpack
 
 # windows start this long before the even minute, so early transmitters are still caught
 LEAD = 1.0
@@ -77,31 +86,93 @@ def _distinct(points: list[tuple[float, int]]) -> list[tuple[float, int]]:
     return out
 
 
-def _keep(spots: dict[str, Spot], spot: Spot | None) -> None:
-    if spot is not None:
-        key = str(spot.message)
-        if key not in spots or spots[key].metric < spot.metric:
-            spots[key] = spot
+def _keep(spots: dict[str, Spot], spot: Spot | None) -> bool:
+    """Add or improve a spot; True when its message is new."""
+    if spot is None:
+        return False
+    key = str(spot.message)
+    new = key not in spots
+    if new or spots[key].metric < spot.metric:
+        spots[key] = spot
+    return new
+
+
+def _residual(x: np.ndarray, spots: list[Spot]) -> np.ndarray:
+    # strongest first, so each fit sees as little of the others as possible
+    for s in sorted(spots, key=lambda s: -max(s.snr.values())):
+        x = subtract(x, symbols(s.message), s.freq, round((s.dt + LEAD + 1.0) * FS))
+    return x
 
 
 def decode_slot(
     windows: dict[str, np.ndarray],
-    min_metric: float = 8.0,
+    min_metric: float = 10.0,
     max_cycles: int = 10000,
     alone: bool = True,
+    passes: int = 2,
 ) -> Slot:
     """Decode one slot from each receiver alone and from all of them combined.
 
     Each window is 375 Hz baseband starting LEAD seconds before the even minute. With
-    alone=False and several receivers, only the combination is decoded.
+    alone=False and several receivers, only the combination is decoded. After each pass,
+    every decoded signal is subtracted and the rest decoded again, so a weak station
+    beside a strong one gets its turn. Each receiver alone, and the combination, only
+    subtract what they decoded themselves, so neither borrows the other's results.
     """
-    power = {n: noise_power(x) for n, x in windows.items()}
     # an all-zero window is a receiver that dropped out mid-slot
-    names = [n for n in windows if power[n] > 0]
-    if not names:
+    live = {n: x for n, x in windows.items() if noise_power(x) > 0}
+    if not live:
         return Slot({}, [])
+    first = _decode_pass(live, min_metric, max_cycles, alone)
+    by_rx = {n: {str(s.message): s for s in v} for n, v in first.alone.items()}
+    comb = {str(s.message): s for s in first.combined} if len(live) > 1 else {}
+
+    for _ in range(passes - 1):
+        grew = False
+        for n, found in by_rx.items():
+            if found:
+                res = _decode_pass(
+                    {n: _residual(live[n], list(found.values()))}, min_metric, max_cycles, True
+                )
+                for s in res.combined:
+                    grew |= _keep(found, s)
+        if comb:
+            rest = {n: _residual(x, list(comb.values())) for n, x in live.items()}
+            for s in _decode_pass(rest, min_metric, max_cycles, False).combined:
+                grew |= _keep(comb, s)
+        if not grew:
+            break
+
+    _drop_shadows([*by_rx.values(), comb])
+    alone_out = {n: _ordered(d) for n, d in by_rx.items()}
+    return Slot(alone_out, _ordered(comb) if len(live) > 1 else alone_out[next(iter(live))])
+
+
+def _drop_shadows(tracks: list[dict[str, Spot]]) -> None:
+    """Remove spots sitting on a better decode of a different message, in any track.
+
+    What a subtraction leaves of a transmission can decode as a second, wrong message at
+    the same frequency and time. Two real stations can't share both that closely.
+    """
+    every = [s for t in tracks for s in t.values()]
+    for t in tracks:
+        for key, s in list(t.items()):
+            if any(o.message != s.message and o.metric > s.metric
+                   and abs(o.freq - s.freq) <= 0.05 and abs(o.dt - s.dt) <= 8 / FS
+                   for o in every):
+                del t[key]
+
+
+def _ordered(d: dict[str, Spot]) -> list[Spot]:
+    return sorted(d.values(), key=lambda s: s.freq)
+
+
+def _decode_pass(
+    windows: dict[str, np.ndarray], min_metric: float, max_cycles: int, alone: bool
+) -> Slot:
+    names = list(windows)
     xs = [windows[n] for n in names]
-    sig2 = [power[n] for n in names]
+    sig2 = [noise_power(x) for x in xs]
     freqs, spec = spectrum(xs[0])
     for x in xs[1:]:
         spec = spec + spectrum(x)[1]
@@ -132,8 +203,5 @@ def decode_slot(
             for f, lag in _distinct([joint, *own]):
                 _keep(combined, _decode(xs, names, f, lag, min_metric, max_cycles))
 
-    def ordered(d: dict[str, Spot]) -> list[Spot]:
-        return sorted(d.values(), key=lambda s: s.freq)
-
-    alone_out = {n: ordered(d) for n, d in found.items()}
-    return Slot(alone_out, ordered(combined) if len(xs) > 1 else alone_out[names[0]])
+    alone_out = {n: _ordered(d) for n, d in found.items()}
+    return Slot(alone_out, _ordered(combined) if len(xs) > 1 else alone_out[names[0]])

@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from wsprpool import Message, decode_slot
+from wsprpool._decode import Spot, _drop_shadows
 from wsprpool._sim import Channel, slot
 
 MSG = Message("K1ABC", "FN42", 37)
@@ -54,3 +55,42 @@ def test_receiver_that_dropped_out_is_ignored():
     xs = slot(MSG, 10.0, [Channel(-22.0)], rng=np.random.default_rng(12))
     res = decode_slot({"a": xs[0], "dead": np.zeros_like(xs[0])})
     assert [s.message for s in res.combined] == [MSG]
+
+
+def test_second_pass_finds_weak_station_beside_strong_one():
+    rng = np.random.default_rng(13)
+    weak = Message("W5KV", "DM79", 23)
+    x = (slot(MSG, 30.0, [Channel(-8.0)], rng=rng, noise=False)[0]
+         + slot(weak, 31.5, [Channel(-26.0)], rng=rng)[0])
+    assert {s.message for s in decode_slot({"r": x}).combined} == {MSG, weak}
+
+
+@pytest.mark.slow
+def test_combination_recovers_station_masked_by_neighbour_at_other_sites():
+    # receiver a hears MSG well; b and c hear MSG weakly under a loud station 0.2 Hz away
+    rng = np.random.default_rng(14)
+    loud = Message("W5KV", "DM79", 23)
+    xs = slot(MSG, 30.0, [Channel(-18.0), Channel(-28.0), Channel(-28.0)], rng=rng)
+    ys = slot(loud, 30.2, [Channel(-40.0), Channel(-12.0), Channel(-12.0)], rng=rng,
+              noise=False)
+    res = decode_slot({k: a + b for k, a, b in zip("abc", xs, ys)})
+    assert {s.message for s in res.combined} == {MSG, loud}
+
+
+def test_second_pass_lets_combination_past_a_loud_neighbour():
+    # a hears MSG well; b hears it weakly beside a loud station whose confident bits outvote a
+    rng = np.random.default_rng(21)
+    loud = Message("W5KV", "DM79", 23)
+    xs = slot(MSG, 30.0, [Channel(-16.0), Channel(-30.0)], rng=rng)
+    ys = slot(loud, 30.2, [Channel(-80.0), Channel(-10.0)], rng=rng, noise=False)
+    res = decode_slot({"a": xs[0] + ys[0], "b": xs[1] + ys[1]})
+    assert {s.message for s in res.combined} == {MSG, loud}
+
+
+def test_shadow_of_a_decode_is_dropped():
+    real = Spot(MSG, 20.0, 0.11, 23.2, {"a": -27.0})
+    junk = Spot(Message("W5KV", "DM79", 23), 20.02, 0.11, 10.5, {"b": -27.0})
+    apart = Spot(Message("N0STP", "EN34", 30), 20.5, 0.11, 10.5, {"b": -27.0})
+    a, b = {"x": real}, {"y": junk, "z": apart}
+    _drop_shadows([a, b])
+    assert list(a.values()) == [real] and list(b.values()) == [apart]

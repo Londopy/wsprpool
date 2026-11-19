@@ -18,6 +18,10 @@ what appears on its GitHub release page. Validated in CI by
   one `.londopy` session file.
 - `wsprpool decode`: decodes a session alone and combined, and looks every spot up on
   wspr.live.
+- A second decode pass: decoded signals are fitted, subtracted from each receiver, and the
+  rest is decoded again, which finds weak stations half a hertz or more from strong ones.
+  Each receiver alone, and the combination, only subtract what they decoded themselves.
+- The Fano metric is printed with every spot. The default cutoff is 10.
 - Simulated fading follows the Watterson model's Gaussian Doppler spectrum.
 
 [Unreleased]: https://github.com/Londopy/wsprpool/commits/main

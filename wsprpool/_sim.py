@@ -44,10 +44,12 @@ def slot(
     channels: list[Channel],
     start: float = 1.0,
     rng: np.random.Generator | None = None,
+    noise: bool = True,
 ) -> list[np.ndarray]:
     """One decode window per receiver: noise of unit variance per sample plus the signal.
 
-    snr_db uses the WSPR convention (signal power over noise in 2500 Hz).
+    snr_db uses the WSPR convention (signal power over noise in 2500 Hz). Pass
+    noise=False to get the signal alone, for adding more stations to a slot.
     """
     rng = rng or np.random.default_rng()
     out = []
@@ -55,7 +57,9 @@ def slot(
         sig = waveform(msg, freq + ch.freq_error)
         amp = np.sqrt(10 ** (ch.snr_db / 10) * 2500 / FS)
         sig = amp * sig * fading(len(sig), ch.doppler, rng)
-        x = (rng.normal(size=WINDOW) + 1j * rng.normal(size=WINDOW)) / np.sqrt(2)
+        x = np.zeros(WINDOW, complex)
+        if noise:
+            x += (rng.normal(size=WINDOW) + 1j * rng.normal(size=WINDOW)) / np.sqrt(2)
         i = int(round((LEAD + start + ch.time_error) * FS))
         x[i : i + len(sig)] += sig[: WINDOW - i]
         out.append(x)
@@ -83,7 +87,7 @@ def decode_rate(
             Channel(snr_db, rng.normal(0, 0.03), rng.normal(0, 0.01), doppler) for _ in range(n)
         ]
         xs = slot(msg, rng.uniform(-90, 90), chans, rng=rng)
-        spots = decode_slot({str(i): x for i, x in enumerate(xs)}, alone=False).combined
+        spots = decode_slot({str(i): x for i, x in enumerate(xs)}, alone=False, passes=1).combined
         hits += any(s.message == msg for s in spots)
     return hits / trials
 

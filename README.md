@@ -58,7 +58,8 @@ wsprpool sim --receivers 1,2,4 --doppler 0.2
 Every receiver hears the same message with its own noise, a small frequency and timing
 error, and with `--doppler`, its own Rayleigh fading. The table shows how often the
 combination decodes at each SNR, then the 50% threshold for each receiver count and the
-gain over one receiver.
+gain over one receiver. There is only one station per slot, so `sim` skips the
+subtraction pass.
 
 ### Record
 
@@ -96,24 +97,28 @@ the lookup.
 
 ## Results so far
 
-**Simulated, independent Rayleigh fading at each receiver** (0.2 Hz Doppler spread,
-20 slots per point): the SNR where half the slots decode drops from -26.4 dB with one
-receiver to -29.2 dB with two (2.8 dB gain) and -31.0 dB with four (4.6 dB).
+**Simulated, independent Rayleigh fading at each receiver** (Watterson model, 0.2 Hz
+Doppler spread, 20 slots per point): the SNR where half the slots decode drops from
+-27.7 dB with one receiver to -30.8 dB with two (3.1 dB gain) and -33.0 dB with four
+(5.3 dB). Under fading the gain is close to the ideal 3 and 6 dB, because each site fades
+at different times and the combination rides through each one's fades.
 
 **Simulated, plain noise** (20 slots per point): the 50% point moves from -29.3 dB with one
-receiver to -31.4 dB with two, -33.1 dB with four and -34.7 dB with eight. That is 2.0, 3.8
-and 5.4 dB of gain against an ideal of 3, 6 and 9 dB. The shortfall is expected: each
+receiver to -31.6 dB with two, -33.3 dB with four and -35.2 dB with eight. That is 2.2, 3.9
+and 5.8 dB of gain against an ideal of 3, 6 and 9 dB. The shortfall is expected: each
 receiver demodulates noncoherently on its own, and noncoherent detection loses more the
 weaker the signal is at each site.
 
 **Real, 2026-11-19 20:30 to 20:38 UTC**, 20 m, three KiwiSDRs (in the FN33, FM18 and EM96 grid squares),
-four slots: 54 spots were decoded by at least one receiver alone and 49 by the combination.
-Two spots were decoded only by the combination: N5JUJ, and W5KV at -30.4 dB at its best
-receiver. Both were reported by more than 80 other stations on wspr.live with the same grid
-and power, as was every other spot in the session. Seven spots that one receiver decoded
-alone were missed by the combination. In the cases examined, the other receivers were
-hearing a different station less than a hertz away and in step with it, and their
-confident bits for the wrong station outvoted the right one (see Limits).
+four slots: 60 spots were decoded by at least one receiver alone and 58 by the combination.
+Five spots were decoded only by the combination: KN2M, N5UTV, N5JUJ, TI4JWC, and W5KV at
+-30.4 dB at its best receiver. All five were reported by 57 or more other stations on
+wspr.live with the same grid and power, and every spot in the session was reported by at
+least 25. Seven spots that one receiver decoded alone were missed by the combination. In
+the cases examined, the other receivers were hearing a different station close by in
+frequency and in step with it, and their confident bits for the wrong station outvoted the
+right one (see Limits). Without the subtraction pass the same session gave 54 alone, 49
+combined and 2 combined only. Decoding the four slots took about 7 minutes.
 
 ## Be a good guest on other people's receivers
 
@@ -139,6 +144,12 @@ recordings running on popular receivers. wsprpool connects with the user name
 5. **Combine and decode.** The LLRs are added, deinterleaved and fed to a Fano sequential
    decoder for the K=32, rate 1/2 WSPR code. Adding true LLRs is the optimal combination
    for independent receivers.
+6. **Subtract and decode again.** Each decoded message is re-encoded, and its tones are
+   fitted to every receiver's samples, tracking amplitude and phase over one-second
+   windows so fading is followed. A fit only counts if the known tone beats the tone for
+   the opposite data bit well above chance, so a neighbour can't be subtracted by mistake.
+   The fitted signals are removed and the whole search runs again on what's left. Each
+   receiver alone and the combination subtract only what they decoded themselves.
 
 The encoder is checked symbol for symbol against the WSJT-X reference for
 `K1ABC FN42 37`.
@@ -147,13 +158,18 @@ The encoder is checked symbol for symbol against the WSJT-X reference for
 
 - Only type 1 messages (plain callsign, 4-character locator, power). Compound callsigns and
   6-character locators (types 2 and 3) are skipped.
-- No drift search and no subtraction of strong signals, both of which WSJT-X's `wsprd`
-  does. Strongly drifting transmitters are decoded worse.
-- The decoder is pure Python. A slot with many signals and several receivers takes a
-  minute or more.
-- Two stations a fraction of a hertz apart break the "independent noise" assumption. A
-  receiver that hears the other station loudly adds confident wrong bits. Subtracting
-  decoded signals before a second pass would fix most of these; it isn't done yet.
+- No drift search, which WSJT-X's `wsprd` has. Strongly drifting transmitters are decoded
+  worse.
+- The decoder is pure Python. A slot with 15 signals and three receivers takes about two
+  minutes, nearly twice as long as without the second pass.
+- Two stations close in frequency break the "independent noise" assumption: a receiver
+  that hears the other station loudly adds confident wrong bits. Subtraction recovers the
+  weaker one from about 0.5 Hz of separation up, but at 0.2 Hz the two can't be told
+  apart well enough to subtract.
+- The metric column is the Fano path metric. Decodes below 10 are dropped, but in
+  simulation a weak signal near the decode threshold occasionally came out as a wrong
+  message scoring above 10. Treat a
+  `combined only` spot as real only when wspr.live confirms it.
 - The combination uses one frequency for every receiver. In the real session, three
   GPS-locked Kiwis put the same strong signal up to 0.47 Hz apart, which costs some
   sensitivity. A small per-receiver search around the joint peak helped some decodes and
