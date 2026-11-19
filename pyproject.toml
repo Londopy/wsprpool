@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wsprpool"
+version = "0.1.0"
+description = "Decode WSPR by adding the soft decisions of several KiwiSDRs"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Londopy" }]
+requires-python = ">=3.11"
+dependencies = ["numpy>=2.0", "scipy>=1.13"]
+keywords = ["wspr", "kiwisdr", "sdr", "ham-radio", "diversity-combining"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Ham Radio",
+]
+
+[project.urls]
+Homepage = "https://github.com/Londopy/wsprpool"
+Repository = "https://github.com/Londopy/wsprpool"
+"Bug Tracker" = "https://github.com/Londopy/wsprpool/issues"
+
+[project.scripts]
+wsprpool = "wsprpool._cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "mypy"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["wsprpool"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# Pinned explicitly rather than inherited: ruff's default selection grows over
+# time, and an unpinned CI ruff could turn a green build red without a commit.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: statistical decode tests that take a minute or more"]

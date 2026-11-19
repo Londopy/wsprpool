@@ -1,0 +1,23 @@
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# recordings are large; share sessions as release assets or elsewhere
+*.wav
+*.londopy
+*-wav/
+
+.env
+*.key
