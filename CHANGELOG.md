@@ -18,5 +18,6 @@ what appears on its GitHub release page. Validated in CI by
   one `.londopy` session file.
 - `wsprpool decode`: decodes a session alone and combined, and looks every spot up on
   wspr.live.
+- Simulated fading follows the Watterson model's Gaussian Doppler spectrum.
 
 [Unreleased]: https://github.com/Londopy/wsprpool/commits/main

@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.signal import lfilter
 
 from ._decode import LEAD, decode_slot
 from ._demod import FS, SPS, TONE_OFFSETS, WINDOW
@@ -28,18 +27,15 @@ def waveform(msg: Message, freq: float) -> np.ndarray:
 
 
 def fading(n: int, doppler: float, rng: np.random.Generator) -> np.ndarray:
-    """Rayleigh fading gain with unit mean power and roughly `doppler` Hz spread."""
+    """Rayleigh fading gain with unit mean power and a Gaussian Doppler spectrum.
+
+    doppler is the two-sigma spread, as in the Watterson HF channel model (ITU-R F.1487).
+    """
     if doppler <= 0:
         return np.ones(n, complex)
-    # one-pole lowpass on complex white noise, run at a low rate and interpolated up
-    step = 16
-    m = n // step + 2
-    a = np.exp(-2 * np.pi * doppler * step / FS)
-    g = lfilter(
-        [np.sqrt(1 - a * a)], [1, -a], (rng.normal(size=m) + 1j * rng.normal(size=m)) / np.sqrt(2)
-    )
-    t = np.arange(n) / step
-    return np.interp(t, np.arange(m), g.real) + 1j * np.interp(t, np.arange(m), g.imag)
+    shape = np.sqrt(np.exp(-np.fft.fftfreq(n, 1 / FS) ** 2 / (2 * (doppler / 2) ** 2)))
+    white = (rng.normal(size=n) + 1j * rng.normal(size=n)) / np.sqrt(2)
+    return np.fft.ifft(np.fft.fft(white) * shape) / np.sqrt(np.mean(shape**2))
 
 
 def slot(
