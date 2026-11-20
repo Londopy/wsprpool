@@ -17,16 +17,25 @@ An excerpt from a real 8-minute session with three KiwiSDRs in the eastern US:
 $ wsprpool decode test2.londopy
 test2.londopy: 3 receivers at 14097.1 kHz
 
-UTC                     MHz    SNR     dt  metric  message              found by       receivers alone / wspr.live reporters
-2026-11-19 20:36  14.097015  -14.9  -0.12   116.6  K8EB EN73 23         both           kiwisdr.k1ra.us-8073,kiwisdr.itfais.com-8073,sdr.k1vl.com-8077 / 88
-2026-11-19 20:36  14.097171  -28.7   0.19    11.0  N5JUJ EM32 23        combined only  - / 89
-2026-11-19 20:36  14.097116  -30.4  -0.22    39.0  W5KV DM79 23         combined only  - / 145
+UTC                     MHz    SNR     dt  drift  metric  message              found by       receivers alone / wspr.live reporters
+2026-11-19 20:30  14.097149  -21.2   0.18   -0.5    58.7  <K0CFW> EN34OQ 23    combined only  - / 117
+2026-11-19 20:30  14.097153  -29.4   0.15   -1.0    20.4  N0STP EN34 30        combined only  - / 93
+2026-11-19 20:34  14.097102  -29.0   1.34   -1.0    11.6  K5EMI EM13 33        combined only  - / 43
+2026-11-19 20:36  14.097014  -21.1  -0.12   -1.5   118.9  K8EB EN73 23         both           kiwisdr.k1ra.us-8073,kiwisdr.itfais.com-8073,sdr.k1vl.com-8077 / 88
 ...
 ```
 
 ## Install
 
-From source, until there is a release:
+With Python 3.11 or newer, install the wheel from the
+[latest release](https://github.com/Londopy/wsprpool/releases/latest). Its release page has
+the exact command, for example:
+
+```console
+pip install https://github.com/Londopy/wsprpool/releases/download/v0.1.0/wsprpool-0.1.0-py3-none-any.whl
+```
+
+Or from source:
 
 ```console
 git clone https://github.com/Londopy/wsprpool
@@ -93,32 +102,53 @@ marked:
 Every spot is looked up on [wspr.live](https://wspr.live), and the count of other stations
 that reported the same transmitter in the same slot is printed. A `combined only` spot
 that others also heard is very unlikely to be a false decode. Pass `--no-check` to skip
-the lookup.
+the lookup, and `--csv spots.csv` to also get the table as a CSV file.
+
+All three WSPR message types decode. Type 2 carries a compound call like `PJ4/K1ABC` and
+no locator. Type 3 carries a 6-character locator and only a 15-bit hash of the call; it
+shows as `<K1ABC> FN42AB 37` once the hash is matched to a call heard in another message
+of the session, or to a wspr.live report from that locator, and as `<...>` until then.
 
 ## Results so far
 
-**Simulated, independent Rayleigh fading at each receiver** (Watterson model, 0.2 Hz
-Doppler spread, 20 slots per point): the SNR where half the slots decode drops from
--27.7 dB with one receiver to -30.8 dB with two (3.1 dB gain) and -33.0 dB with four
-(5.3 dB). Under fading the gain is close to the ideal 3 and 6 dB, because each site fades
-at different times and the combination rides through each one's fades.
+With 20 slots per point, each threshold below is good to about half a decibel.
 
-**Simulated, plain noise** (20 slots per point): the 50% point moves from -29.3 dB with one
-receiver to -31.6 dB with two, -33.3 dB with four and -35.2 dB with eight. That is 2.2, 3.9
-and 5.8 dB of gain against an ideal of 3, 6 and 9 dB. The shortfall is expected: each
-receiver demodulates noncoherently on its own, and noncoherent detection loses more the
-weaker the signal is at each site.
+**Simulated, independent Rayleigh fading at each receiver** (Watterson model, 0.2 Hz
+Doppler spread): the SNR where half the slots decode drops from -28.2 dB with one
+receiver to -30.6 dB with two (2.4 dB gain) and -33.0 dB with four (4.8 dB). Each site
+fades at different times, so the combination rides through each one's fades.
+
+**Simulated, plain noise:** the 50% point moves from -29.0 dB with one receiver to
+-31.5 dB with two and -33.2 dB with four, a gain of 2.5 and 4.2 dB against an ideal of 3
+and 6 dB. In a separate run eight receivers reached -34.7 dB against -29.5 dB for one,
+a 5.2 dB gain against an ideal of 9. The shortfall is expected: each receiver
+demodulates noncoherently on its own, and noncoherent detection loses more the weaker the
+signal is at each site.
 
 **Real, 2026-11-19 20:30 to 20:38 UTC**, 20 m, three KiwiSDRs (in the FN33, FM18 and EM96 grid squares),
-four slots: 60 spots were decoded by at least one receiver alone and 58 by the combination.
-Five spots were decoded only by the combination: KN2M, N5UTV, N5JUJ, TI4JWC, and W5KV at
--30.4 dB at its best receiver. All five were reported by 57 or more other stations on
-wspr.live with the same grid and power, and every spot in the session was reported by at
-least 25. Seven spots that one receiver decoded alone were missed by the combination. In
-the cases examined, the other receivers were hearing a different station close by in
-frequency and in step with it, and their confident bits for the wrong station outvoted the
-right one (see Limits). Without the subtraction pass the same session gave 54 alone, 49
-combined and 2 combined only. Decoding the four slots took about 7 minutes.
+four slots: 72 spots were decoded by at least one receiver alone and 72 by the combination.
+Six spots were decoded only by the combination. Five of them were reported by 43 or more
+other stations on wspr.live with the same grid and power: KN2M, N0STP, K5EMI, K7CMI, and
+K0CFW's hashed type 3 message. The sixth, `7F3NQR JH81 57` at metric 11.4, was reported
+by nobody and is almost certainly a false decode; a real spot in the same session scored
+11.6, so no metric cutoff separates the two (see Limits). Every other spot was reported by
+at least 11 other stations. Six spots that one receiver decoded alone were missed by the
+combination. In the cases examined, the other receivers were hearing a different station
+close by in frequency and in step with it, and their confident bits for the wrong station
+outvoted the right one.
+
+The same session, decoded with fewer features:
+
+| Decoder | Alone | Combined | Combined only |
+|---|---|---|---|
+| Type 1 only, one pass, no drift search | 54 | 49 | 2 |
+| Plus subtraction and a second pass | 60 | 58 | 5 |
+| Plus type 2 and 3 messages | 67 | 64 | 4 |
+| Plus the drift search (this release) | 72 | 72 | 6 |
+
+The combined-only count can drop as the decoder improves, because a better single-receiver
+decode moves a spot from "combined only" to "both". Decoding the four slots took about
+8 minutes.
 
 ## Be a good guest on other people's receivers
 
@@ -135,8 +165,10 @@ recordings running on popular receivers. wsprpool connects with the user name
    4-tone-wide smoothed spectrum become candidates, so a signal too weak to see at any one
    site can still show up in the sum. Each receiver's own peaks are added too.
 3. **Sync.** For each candidate, the 162-bit sync vector is correlated over a grid of
-   frequencies (±1 Hz) and start times (0 to 5 s), and the scores are summed across
-   receivers.
+   frequencies (±1 Hz), start times (0 to 5 s) and drifts (±4 Hz over the transmission),
+   and the scores are summed across receivers. Symbol powers are computed once on the
+   frequency grid; a drifting signal is a path across that grid, so each drift costs
+   only a lookup.
 4. **Soft bits.** At the best frequency and time, each receiver computes the exact
    noncoherent 4-FSK log-likelihood ratio for every data bit. The noise level comes from
    the two tones the sync bit rules out, and the signal level is tracked over 15 symbols.
@@ -152,15 +184,13 @@ recordings running on popular receivers. wsprpool connects with the user name
    receiver alone and the combination subtract only what they decoded themselves.
 
 The encoder is checked symbol for symbol against the WSJT-X reference for
-`K1ABC FN42 37`.
+`K1ABC FN42 37`, and against values worked out from the WSJT-X sources for type 2 and 3
+messages. The callsign hash matches the hashes real type 3 transmissions carried in the
+session above.
 
 ## Limits
 
-- Only type 1 messages (plain callsign, 4-character locator, power). Compound callsigns and
-  6-character locators (types 2 and 3) are skipped.
-- No drift search, which WSJT-X's `wsprd` has. Strongly drifting transmitters are decoded
-  worse.
-- The decoder is pure Python. A slot with 15 signals and three receivers takes about two
+- The decoder is pure Python. A slot with 18 signals and three receivers takes about two
   minutes, nearly twice as long as without the second pass.
 - Two stations close in frequency break the "independent noise" assumption: a receiver
   that hears the other station loudly adds confident wrong bits. Subtraction recovers the
@@ -168,8 +198,14 @@ The encoder is checked symbol for symbol against the WSJT-X reference for
   apart well enough to subtract.
 - The metric column is the Fano path metric. Decodes below 10 are dropped, but in
   simulation a weak signal near the decode threshold occasionally came out as a wrong
-  message scoring above 10. Treat a
-  `combined only` spot as real only when wspr.live confirms it.
+  message scoring above 10, and the real session above has one such decode. Accepting
+  all three message types and searching drift both widen what noise can pass for, so
+  treat a `combined only` spot as real only when wspr.live confirms it.
+- A hashed call shares its 15-bit hash with roughly one in 30,000 other calls, so a
+  type 3 message named in-session can name the wrong one. A wspr.live report with a
+  matching hash, locator and power overrides it.
+- `wsprd` also decodes a rare type 3 form that carries a 4-character locator (a
+  compound call with a numbered suffix, like `<PA0SKT/2> JO33 40`). wsprpool drops it.
 - The combination uses one frequency for every receiver. In the real session, three
   GPS-locked Kiwis put the same strong signal up to 0.47 Hz apart, which costs some
   sensitivity. A small per-receiver search around the joint peak helped some decodes and

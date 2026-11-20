@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import sys
 import zipfile
@@ -13,11 +14,12 @@ from urllib.error import URLError
 import numpy as np
 
 from ._version import __version__
-from ._decode import Spot, decode_slot
+from ._decode import Slot, Spot, decode_slot
 from ._kiwi import Receiver, record, status, unusable
 from ._session import load, save, slots
 from ._sim import decode_rate, threshold
-from ._spots import reporters
+from ._spots import Row, confirm, fetch
+from ._wspr import callhash, resolve
 
 
 def _floats(text: str) -> list[float]:
@@ -81,8 +83,8 @@ def cmd_record(a: argparse.Namespace) -> int:
     return 0
 
 
-HEADER = (f"{'UTC':<16}  {'MHz':>9}  {'SNR':>5}  {'dt':>5}  {'metric':>6}  {'message':<20} "
-          f"{'found by':<14} receivers alone / wspr.live reporters")
+HEADER = (f"{'UTC':<16}  {'MHz':>9}  {'SNR':>5}  {'dt':>5}  {'drift':>5}  {'metric':>6}  "
+          f"{'message':<20} {'found by':<14} receivers alone / wspr.live reporters")
 
 
 def _row(when: float, freq_hz: float, spot: Spot, alone: list[str], tag: str,
@@ -91,8 +93,8 @@ def _row(when: float, freq_hz: float, spot: Spot, alone: list[str], tag: str,
     heard = ",".join(alone) if alone else "-"
     check = "" if others is None else f" / {len(others)}"
     return (f"{t}  {(freq_hz + spot.freq) / 1e6:9.6f}  {max(spot.snr.values()):5.1f}  "
-            f"{spot.dt:5.2f}  {spot.metric:6.1f}  {str(spot.message):<20} {tag:<14} "
-            f"{heard}{check}")
+            f"{spot.dt:5.2f}  {spot.drift:5.1f}  {spot.metric:6.1f}  {str(spot.message):<20} "
+            f"{tag:<14} {heard}{check}")
 
 
 def _tag(receivers: int, alone: list[str], in_comb: bool) -> str:
@@ -103,19 +105,51 @@ def _tag(receivers: int, alone: list[str], in_comb: bool) -> str:
     return "alone only"
 
 
+def _resolve_hashes(results: list[tuple[float, Slot]]) -> None:
+    """Name type 3 calls from any type 1 or 2 message heard in the session."""
+    every = [s for _, res in results for s in res.combined + sum(res.alone.values(), [])]
+    calls = {callhash(s.message.call): s.message.call for s in every if s.message.kind != 3}
+    for s in every:
+        s.message = resolve(s.message, calls)
+
+
+def _write_csv(path: Path, rows: list[tuple[float, Spot, list[str], str, set[str] | None]],
+               freq_hz: float) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["utc", "mhz", "snr", "dt", "drift", "metric", "call", "grid", "power",
+                    "found_by", "receivers_alone", "wspr_live_reporters"])
+        for minute, spot, alone, tag, others in rows:
+            m = spot.message
+            w.writerow([
+                datetime.fromtimestamp(minute, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                f"{(freq_hz + spot.freq) / 1e6:.6f}", f"{max(spot.snr.values()):.1f}",
+                f"{spot.dt:.2f}", f"{spot.drift:.1f}", f"{spot.metric:.1f}",
+                m.call or f"<{m.callhash}>", m.grid, m.power, tag, " ".join(alone),
+                "" if others is None else len(others),
+            ])
+
+
 def cmd_decode(a: argparse.Namespace) -> int:
+    if a.csv and not a.csv.resolve().parent.is_dir():
+        raise ValueError(f"can't write {a.csv}: {a.csv.resolve().parent} is not a directory")
     freq_khz, streams = load(a.file)
     freq_hz = freq_khz * 1000
     print(f"{a.file}: {len(streams)} receivers at {freq_khz:g} kHz")
 
-    # (slot, message) -> best spot, receivers that decoded it alone, in the combination,
-    # and how many receivers covered that slot
-    found: dict[tuple[float, str], tuple[Spot, list[str], bool, int]] = {}
+    results = []
     for minute, windows in slots(streams):
         res = decode_slot(windows)
         print(f"{datetime.fromtimestamp(minute, timezone.utc):%H:%M}  "
               + "  ".join(f"{n}={len(s)}" for n, s in res.alone.items())
               + f"  combined={len(res.combined)}", file=sys.stderr, flush=True)
+        results.append((minute, res))
+    _resolve_hashes(results)
+
+    # (slot, message) -> best spot, receivers that decoded it alone, in the combination,
+    # and how many receivers covered that slot
+    found: dict[tuple[float, str], tuple[Spot, list[str], bool, int]] = {}
+    for minute, res in results:
         live = len(res.alone)
         best: dict[str, Spot] = {}
         for spot in [s for spots in res.alone.values() for s in spots] + res.combined:
@@ -127,26 +161,31 @@ def cmd_decode(a: argparse.Namespace) -> int:
             alone = [n for n, spots in res.alone.items() if key in {str(s.message) for s in spots}]
             found[(minute, key)] = (spot, alone, key in comb, live)
 
-    seen: dict[tuple[float, str, str, int], set[str]] | None = None
+    seen: dict[float, list[Row]] | None = None
     if a.check:
         try:
-            seen = reporters([m for m, _ in found],
-                             {s.message.call for s, _, _, _ in found.values()}, freq_hz)
+            seen = fetch([m for m, _ in found], [s.message for s, _, _, _ in found.values()],
+                         freq_hz)
         except (URLError, OSError, ValueError) as e:
             print(f"wspr.live check failed: {e}", file=sys.stderr)
 
     print()
     print(HEADER)
     combined = combined_only = confirmed = 0
+    table = []
     for (minute, _), (spot, alone, in_comb, live) in sorted(found.items()):
         tag = _tag(live, alone, in_comb)
-        m = spot.message
-        others = None if seen is None else seen.get((minute, m.call, m.grid, m.power), set())
+        others = None
+        if seen is not None:
+            spot.message, others = confirm(spot.message, seen.get(minute, []))
         combined += in_comb
         if tag == "combined only":
             combined_only += 1
             confirmed += bool(others)
         print(_row(minute, freq_hz, spot, alone, tag, others))
+        table.append((minute, spot, alone, tag, others))
+    if a.csv:
+        _write_csv(a.csv, table, freq_hz)
 
     print()
     for st in streams:
@@ -157,7 +196,7 @@ def cmd_decode(a: argparse.Namespace) -> int:
         print(f"{'combined':<32} {combined:5d}")
         line = f"{'combined only':<32} {combined_only:5d}"
         if seen is not None:
-            line += f"  ({confirmed} also reported to wspr.live with the same grid and power)"
+            line += f"  ({confirmed} also reported to wspr.live by other stations)"
         print(line)
     return 0
 
@@ -189,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("file", type=Path)
     d.add_argument("--no-check", dest="check", action="store_false",
                    help="skip looking spots up on wspr.live")
+    d.add_argument("--csv", type=Path, help="also write the spots to this CSV file")
     d.set_defaults(fn=cmd_decode)
 
     a = p.parse_args(argv)
