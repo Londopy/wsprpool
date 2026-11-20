@@ -27,15 +27,14 @@ UTC                     MHz    SNR     dt  drift  metric  message              f
 
 ## Install
 
-With Python 3.11 or newer, install the wheel from the
-[latest release](https://github.com/Londopy/wsprpool/releases/latest). Its release page has
-the exact command, for example:
+With Python 3.11 or newer:
 
 ```console
-pip install https://github.com/Londopy/wsprpool/releases/download/v0.1.0/wsprpool-0.1.0-py3-none-any.whl
+pip install wsprpool
 ```
 
-Or from source:
+The wheel and sdist are also on the [latest release](https://github.com/Londopy/wsprpool/releases/latest)
+with checksums and torrents. Or from source:
 
 ```console
 git clone https://github.com/Londopy/wsprpool
