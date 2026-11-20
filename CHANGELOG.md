@@ -8,6 +8,8 @@ what appears on its GitHub release page. Validated in CI by
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-19
+
 ### Added
 
 - WSPR type 1 encoder, a soft-decision 4-FSK demodulator and a Fano decoder.
@@ -24,4 +26,5 @@ what appears on its GitHub release page. Validated in CI by
 - The Fano metric is printed with every spot. The default cutoff is 10.
 - Simulated fading follows the Watterson model's Gaussian Doppler spectrum.
 
-[Unreleased]: https://github.com/Londopy/wsprpool/commits/main
+[Unreleased]: https://github.com/Londopy/wsprpool/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Londopy/wsprpool/releases/tag/v0.1.0
