@@ -1,5 +1,6 @@
 [build-system]
-requires = ["hatchling"]
+# pinned so a rebuild for PyPI matches the release checksums byte for byte
+requires = ["hatchling==1.33.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -35,6 +36,10 @@ dev = ["pytest", "ruff", "mypy"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["wsprpool"]
+
+# CI files and the release script are for this repo, not for anyone building from the sdist
+[tool.hatch.build.targets.sdist]
+exclude = [".github/", "scripts/"]
 
 [tool.ruff]
 line-length = 100
