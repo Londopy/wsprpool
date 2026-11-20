@@ -50,13 +50,19 @@ def slot(
     rng: np.random.Generator | None = None,
     noise: bool = True,
     drift: float = 0.0,
+    shared: float = 0.0,
 ) -> list[np.ndarray]:
     """One decode window per receiver: noise of unit variance per sample plus the signal.
 
     snr_db uses the WSPR convention (signal power over noise in 2500 Hz). Pass
-    noise=False to get the signal alone, for adding more stations to a slot.
+    noise=False to get the signal alone, for adding more stations to a slot. shared is the
+    fraction of each receiver's noise power that is the same at every receiver, like
+    interference that reaches all the sites at once.
     """
     rng = rng or np.random.default_rng()
+    common = None
+    if noise and shared:
+        common = (rng.normal(size=WINDOW) + 1j * rng.normal(size=WINDOW)) / np.sqrt(2)
     out = []
     for ch in channels:
         sig = waveform(msg, freq + ch.freq_error, drift)
@@ -64,7 +70,8 @@ def slot(
         sig = amp * sig * fading(len(sig), ch.doppler, rng)
         x = np.zeros(WINDOW, complex)
         if noise:
-            x += (rng.normal(size=WINDOW) + 1j * rng.normal(size=WINDOW)) / np.sqrt(2)
+            own = (rng.normal(size=WINDOW) + 1j * rng.normal(size=WINDOW)) / np.sqrt(2)
+            x += own if common is None else np.sqrt(1 - shared) * own + np.sqrt(shared) * common
         i = int(round((LEAD + start + ch.time_error) * FS))
         x[i : i + len(sig)] += sig[: WINDOW - i]
         out.append(x)
@@ -82,16 +89,21 @@ def random_message(rng: np.random.Generator) -> Message:
 
 
 def decode_rate(
-    n: int, snr_db: float, trials: int, doppler: float, rng: np.random.Generator
+    n: int, snr_db: float, trials: int, doppler: float, rng: np.random.Generator,
+    shared: float = 0.0, freq_spread: float = 0.03,
 ) -> float:
-    """Fraction of slots where the transmitted message is decoded by n combined receivers."""
+    """Fraction of slots where the transmitted message is decoded by n combined receivers.
+
+    Each receiver's oscillator is off by a normal draw with sd freq_spread Hz.
+    """
     hits = 0
     for _ in range(trials):
         msg = random_message(rng)
         chans = [
-            Channel(snr_db, rng.normal(0, 0.03), rng.normal(0, 0.01), doppler) for _ in range(n)
+            Channel(snr_db, rng.normal(0, freq_spread), rng.normal(0, 0.01), doppler)
+            for _ in range(n)
         ]
-        xs = slot(msg, rng.uniform(-90, 90), chans, rng=rng)
+        xs = slot(msg, rng.uniform(-90, 90), chans, rng=rng, shared=shared)
         spots = decode_slot({str(i): x for i, x in enumerate(xs)}, alone=False, passes=1).combined
         hits += any(s.message == msg for s in spots)
     return hits / trials
@@ -102,4 +114,17 @@ def threshold(snrs: list[float], rates: list[float], level: float = 0.5) -> floa
     for (s0, r0), (s1, r1) in zip(zip(snrs, rates), zip(snrs[1:], rates[1:])):
         if (r0 - level) * (r1 - level) <= 0 and r0 != r1:
             return s0 + (level - r0) * (s1 - s0) / (r1 - r0)
+    return None
+
+
+def threshold_error(snrs: list[float], rates: list[float], trials: int,
+                    level: float = 0.5) -> float | None:
+    """One standard error of `threshold`, from the binomial spread of a rate near `level`.
+
+    The rate measured at the crossing could be off by sqrt(p(1-p)/trials); dividing by the
+    curve's slope there turns that into decibels.
+    """
+    for (s0, r0), (s1, r1) in zip(zip(snrs, rates), zip(snrs[1:], rates[1:])):
+        if (r0 - level) * (r1 - level) <= 0 and r0 != r1:
+            return float(np.sqrt(level * (1 - level) / trials) * abs((s1 - s0) / (r1 - r0)))
     return None
