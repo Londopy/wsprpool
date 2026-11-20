@@ -19,3 +19,4 @@
 *.exe binary
 *.londopy binary
 *.wav binary
+*.npz binary

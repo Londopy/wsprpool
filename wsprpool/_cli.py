@@ -14,10 +14,10 @@ from urllib.error import URLError
 import numpy as np
 
 from ._version import __version__
-from ._decode import Slot, Spot, decode_slot
+from ._decode import Slot, Spot, decode_slot, llr_correlation
 from ._kiwi import Receiver, record, status, unusable
 from ._session import load, save, slots
-from ._sim import decode_rate, threshold
+from ._sim import decode_rate, threshold, threshold_error
 from ._spots import Row, confirm, fetch
 from ._wspr import callhash, resolve
 
@@ -28,26 +28,38 @@ def _floats(text: str) -> list[float]:
 
 
 def cmd_sim(a: argparse.Namespace) -> int:
+    if not 0 <= a.shared <= 1:
+        raise ValueError(f"--shared is a fraction between 0 and 1, not {a.shared:g}")
+    if not 0 <= a.freq_spread < float("inf"):
+        raise ValueError(f"--freq-spread is a spread in Hz, 0 or more, not {a.freq_spread:g}")
     ns = [int(n) for n in a.receivers.split(",")]
     snrs = _floats(a.snr)
     rng = np.random.default_rng(a.seed)
-    print(f"decode rate over {a.trials} slots per cell, doppler {a.doppler} Hz")
+    print(f"decode rate over {a.trials} slots per cell, doppler {a.doppler} Hz, "
+          f"shared noise {a.shared:g}, receiver frequency spread {a.freq_spread:g} Hz")
     print("snr dB  " + "".join(f"{f'N={n}':>8}" for n in ns))
     rates: dict[int, list[float]] = {n: [] for n in ns}
     for s in snrs:
         for n in ns:
-            rates[n].append(decode_rate(n, s, a.trials, a.doppler, rng))
+            rates[n].append(decode_rate(n, s, a.trials, a.doppler, rng, a.shared,
+                                        a.freq_spread))
         print(f"{s:6.1f}  " + "".join(f"{rates[n][-1]:8.2f}" for n in ns), flush=True)
     print()
-    print("50% threshold and gain over the first column (ideal is 10 log10 N)")
+    print("50% threshold and gain over the first column, each with one standard error "
+          "(ideal gain is 10 log10 N)")
     base = threshold(snrs, rates[ns[0]])
+    base_err = threshold_error(snrs, rates[ns[0]], a.trials)
     for n in ns:
         t = threshold(snrs, rates[n])
-        if t is None:
+        err = threshold_error(snrs, rates[n], a.trials)
+        if t is None or err is None:
             print(f"  N={n:<3} threshold outside the SNR range")
             continue
-        gain = f"gain {base - t:4.1f} dB, ideal {10 * np.log10(n / ns[0]):4.1f}" if base else ""
-        print(f"  N={n:<3} {t:6.1f} dB  {gain}")
+        gain = ""
+        if base is not None and base_err is not None:
+            gain = (f"gain {base - t:4.1f} +- {np.hypot(err, base_err) if n != ns[0] else 0:.1f} "
+                    f"dB, ideal {10 * np.log10(n / ns[0]):4.1f}")
+        print(f"  N={n:<3} {t:6.1f} +- {err:.1f} dB  {gain}")
     return 0
 
 
@@ -198,6 +210,11 @@ def cmd_decode(a: argparse.Namespace) -> int:
         if seen is not None:
             line += f"  ({confirmed} also reported to wspr.live by other stations)"
         print(line)
+        cor = llr_correlation([s for _, res in results if len(res.alone) > 1
+                               for s in res.combined])
+        if cor is not None:
+            print(f"{'LLR error correlation':<32} {cor[0]:5.2f}  (over {cor[1]} receiver pairs at "
+                  "combined spots; 0 means independent receivers)")
     return 0
 
 
@@ -213,6 +230,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--trials", type=int, default=20)
     s.add_argument("--doppler", type=float, default=0.0,
                    help="Rayleigh fading spread in Hz, independent per receiver (0 = none)")
+    s.add_argument("--shared", type=float, default=0.0,
+                   help="fraction of noise power that is the same at every receiver (0 to 1)")
+    s.add_argument("--freq-spread", type=float, default=0.03,
+                   help="sd in Hz of each receiver's own frequency error")
     s.add_argument("--seed", type=int, default=1)
     s.set_defaults(fn=cmd_sim)
 

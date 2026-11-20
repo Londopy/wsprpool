@@ -141,7 +141,8 @@ def fit(x: np.ndarray, tones: np.ndarray, f: float, lag: int,
     if not len(lags):
         return f, lag, 0.0
     best = (f, int(lags[0]), -np.inf)
-    for step in (np.arange(-0.25, 0.251, 0.05), np.arange(-0.04, 0.041, 0.01)):
+    # a receiver's own oscillator can put the signal a hertz from where the spot says
+    for step in (np.arange(-1.0, 1.01, 0.1), np.arange(-0.05, 0.051, 0.01)):
         for ff in best[0] + step:
             known = (np.abs(tone_sums(x, ff, lags, drift)[tones, :, i]) ** 2).sum(axis=0)
             j = int(np.argmax(known))

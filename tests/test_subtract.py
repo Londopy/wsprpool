@@ -39,3 +39,9 @@ def test_removal_follows_drift():
     x = slot(MSG, 30.0, [Channel(0.0)], rng=np.random.default_rng(3), noise=False, drift=3.0)[0]
     assert _left(x, subtract(x, symbols(MSG), 30.0, START, 3.0)) < 1e-4
     assert _left(x, subtract(x, symbols(MSG), 30.0, START)) > 0.1
+
+
+def test_finds_a_signal_most_of_a_hertz_from_the_frequency_it_was_given():
+    # a receiver's own oscillator can put the signal this far from the spot's frequency
+    x = slot(MSG, 30.0, [Channel(0.0)], rng=np.random.default_rng(3), noise=False)[0]
+    assert _left(x, subtract(x, symbols(MSG), 30.8, START + 20)) < 1e-4

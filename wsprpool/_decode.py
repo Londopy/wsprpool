@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import combinations
 
 import numpy as np
 
@@ -18,7 +19,7 @@ from ._demod import (
     tone_sums,
 )
 from ._fano import fano
-from ._wspr import NSYM, Message, deinterleave, symbols, unpack
+from ._wspr import NSYM, SYNC, Message, deinterleave, symbols, unpack
 
 # windows start this long before the even minute, so early transmitters are still caught
 LEAD = 1.0
@@ -27,6 +28,13 @@ COARSE_LAGS = np.arange(0, int(5 * FS), 16)
 FINE_DF = np.arange(-0.1, 0.101, 0.025)
 # total frequency change over the transmission
 DRIFTS = np.arange(-4.0, 4.01, 1.0)
+# a receiver whose own sync score reaches this sees the signal well enough to trust its own
+# frequency in the combination; below it the joint frequency is the better guess
+OWN_SYNC = 6.0
+OWN_RANGE = 1.0
+OWN_LAG = 64
+# receivers below this at a spot don't hear it, so their LLRs say nothing about shared noise
+HEARS_DB = -40.0
 
 
 @dataclass
@@ -37,6 +45,8 @@ class Spot:
     metric: float
     snr: dict[str, float] = field(default_factory=dict)
     drift: float = 0.0
+    # each receiver's LLRs for the 162 data bits, in channel order
+    llr: dict[str, np.ndarray] = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def combined_snr(self) -> float:
@@ -77,35 +87,44 @@ def _coarse(x: np.ndarray, sigma2: float, fs: np.ndarray, lags: np.ndarray) -> n
 
 def _refine(
     xs: list[np.ndarray], sig2: list[float], f: float, lag: int, drift: float
-) -> tuple[float, int, float]:
+) -> tuple[float, int, float, float]:
+    """Fine frequency, start and drift near a coarse peak, and the summed sync score there."""
     fs = f + FINE_DF
     lags = np.clip(np.arange(lag - 16, lag + 17, 2), 0, COARSE_LAGS[-1])
     score = _scores(xs, sig2, fs, lags, drift).sum(axis=0)
     i, j = np.unravel_index(int(np.argmax(score)), score.shape)
     f, lag = float(fs[i]), int(lags[j])
     # the coarse grid only knows drift to the nearest hertz
-    drift = max((drift - 0.5, drift, drift + 0.5), key=lambda d: float(
-        _scores(xs, sig2, np.array([f]), np.array([lag]), d).sum()))
-    return f, lag, drift
+    best, drift = max((float(_scores(xs, sig2, np.array([f]), np.array([lag]), d).sum()), d)
+                      for d in (drift - 0.5, drift, drift + 0.5))
+    return f, lag, drift, best
 
 
 def _decode(
     xs: list[np.ndarray], names: list[str], f: float, lag: int, drift: float,
-    min_metric: float, max_cycles: int,
+    min_metric: float, max_cycles: int, offsets: list[float] | None = None,
 ) -> Spot | None:
-    llr = np.zeros(162)
-    snr = {}
-    for n, x in zip(names, xs):
-        bits, s = soft_bits(tone_sums(x, f, np.array([lag]), drift)[:, 0, :])
-        llr += bits
-        snr[n] = s
-    out = fano(deinterleave(llr), max_cycles=max_cycles)
+    """Add every receiver's LLRs at (f, lag, drift) and run the Fano decoder on the sum.
+
+    offsets moves each receiver's frequency away from f, for receivers whose own oscillator
+    puts the signal somewhere slightly different.
+    """
+    snr, each = {}, {}
+    for n, x, off in zip(names, xs, offsets or [0.0] * len(xs)):
+        each[n], snr[n] = soft_bits(tone_sums(x, f + off, np.array([lag]), drift)[:, 0, :])
+    out = fano(deinterleave(np.sum(list(each.values()), axis=0)), max_cycles=max_cycles)
     if out is None or out[1] < min_metric:
         return None
     msg = unpack(out[0])
     if msg is None:
         return None
-    return Spot(msg, f, lag / FS - LEAD - 1.0, out[1], snr, drift)
+    return Spot(msg, f, lag / FS - LEAD - 1.0, out[1], snr, drift, each)
+
+
+def _offsets(own: list[tuple[float, int, float, float]], f: float, lag: int) -> list[float]:
+    """Each receiver's own frequency relative to f, where it clearly sees the same signal."""
+    return [g - f if score >= OWN_SYNC and abs(g - f) <= OWN_RANGE and abs(m - lag) <= OWN_LAG
+            else 0.0 for g, m, _, score in own]
 
 
 def _distinct(points: list[tuple[float, int, float]]) -> list[tuple[float, int, float]]:
@@ -193,6 +212,29 @@ def _drop_shadows(tracks: list[dict[str, Spot]]) -> None:
                 del t[key]
 
 
+def llr_correlation(spots: list[Spot]) -> tuple[float, int] | None:
+    """Mean correlation between receivers' LLR errors at decoded spots, and how many pairs.
+
+    Signing each receiver's LLRs by the decoded bits, then taking out their 15-symbol
+    moving average, leaves that receiver's noise. Only pairs of receivers that both hear
+    the spot count. Independent receivers give about 0. Interference reaching several
+    sites at once pushes it up, and with correlation c, N receivers are worth only
+    N / (1 + (N - 1) c) independent ones.
+    """
+    cors = []
+    for s in spots:
+        sign = 1 - (symbols(s.message) - SYNC)
+        errs = [_detrend(v * sign) for n, v in s.llr.items() if s.snr[n] >= HEARS_DB]
+        cors += [float(np.corrcoef(a, b)[0, 1]) for a, b in combinations(errs, 2)]
+    return (float(np.mean(cors)), len(cors)) if cors else None
+
+
+def _detrend(v: np.ndarray, width: int = 15) -> np.ndarray:
+    """v less its moving average, so slow fading common to all sites doesn't count."""
+    trend = np.convolve(np.pad(v, width // 2, mode="edge"), np.ones(width) / width, "valid")
+    return v - trend
+
+
 def _ordered(d: dict[str, Spot]) -> list[Spot]:
     return sorted(d.values(), key=lambda s: s.freq)
 
@@ -224,15 +266,18 @@ def _decode_pass(
             own.append(_refine([xs[r]], [sig2[r]], float(fs[i]), int(COARSE_LAGS[j]),
                                float(DRIFTS[t])))
         for r, n in enumerate(names if each else []):
-            _keep(found[n], _decode([xs[r]], [n], *own[r], min_metric, max_cycles))
+            _keep(found[n], _decode([xs[r]], [n], *own[r][:3], min_metric, max_cycles))
         if len(xs) > 1:
             total = grid.sum(axis=0)
             t, i, j = np.unravel_index(int(np.argmax(total)), total.shape)
             joint = _refine(xs, sig2, float(fs[i]), int(COARSE_LAGS[j]), float(DRIFTS[t]))
             # two stations a hertz apart can each dominate a different receiver, so the
             # joint peak may belong to the other one; try every receiver's peak as well
-            for f, lag, drift in _distinct([joint, *own]):
-                _keep(combined, _decode(xs, names, f, lag, drift, min_metric, max_cycles))
+            for f, lag, drift in _distinct([joint[:3], *(o[:3] for o in own)]):
+                off = _offsets(own, f, lag)
+                # an own peak can belong to a neighbour, so also try everyone at one frequency
+                for o in [off, None] if any(off) else [None]:
+                    _keep(combined, _decode(xs, names, f, lag, drift, min_metric, max_cycles, o))
 
     alone_out = {n: _ordered(d) for n, d in found.items()}
     return Slot(alone_out, _ordered(combined) if len(xs) > 1 else alone_out[names[0]])
