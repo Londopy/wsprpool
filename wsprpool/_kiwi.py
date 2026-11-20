@@ -50,7 +50,60 @@ def unusable(st: dict[str, str]) -> str | None:
         return "no GPS fix, so its timestamps can't be lined up with the others"
     if int(st.get("users", "0")) >= int(st.get("users_max", "0")):
         return f"all {st.get('users_max')} slots in use"
+    # the owner allows no recording programs; the receiver takes the connection, then sends nothing
+    if st.get("ext_api") == "0":
+        return "its owner doesn't allow recording programs like kiwirecorder (ext_api is 0)"
     return None
+
+
+# a receiver that is streaming has written well past its wav header by now
+SILENT_AFTER = 45.0
+# what kiwiclient logs when the receiver ends the session, 5 seconds before it reconnects;
+# its busy-retry line differs in the delay
+ENDED = "Reconnecting after 5 seconds"
+
+
+def _stop(p: subprocess.Popen) -> None:
+    if p.poll() is None:
+        p.kill()
+        p.wait()
+
+
+def _watch(procs: dict[Receiver, subprocess.Popen], out: Path, start: float,
+           deadline: float, poll: float = 1.0) -> None:
+    """Wait for the recorders, stopping any the receiver has cut off or never served.
+
+    A receiver ends the session at its owner's time limit, and kiwiclient would quietly
+    reconnect and carry on past it. Some owners also limit recording programs in ways
+    /status doesn't show: the receiver takes the connection and then sends nothing. Both
+    are stopped here, so the owner's rules hold and no slot is held for nothing.
+    """
+    silent_checked = False
+    while time.time() < deadline and any(p.poll() is None for p in procs.values()):
+        for rx, p in procs.items():
+            if p.poll() is not None:
+                continue
+            log = (out / rx.label / "kiwirecorder.log").read_text(errors="replace")
+            ended = next((line for line in log.splitlines() if ENDED in line), None)
+            if ended:
+                _stop(p)
+                held = time.time() - start
+                reason = ended.split(ENDED)[0].rstrip(" .").rsplit(f"{rx.port} ", 1)[-1]
+                print(f"{rx.host}:{rx.port}: {reason} after "
+                      + (f"{held / 60:.0f} min" if held >= 60 else f"{held:.0f} s")
+                      + "; keeping what was recorded and not reconnecting, since this is "
+                      "usually the owner's time limit", file=sys.stderr)
+        if not silent_checked and time.time() >= start + SILENT_AFTER:
+            silent_checked = True
+            for rx, p in procs.items():
+                fresh = [w for w in (out / rx.label).glob("*.wav")
+                         if w.stat().st_mtime >= start - 30]
+                if p.poll() is None and not any(w.stat().st_size > 4096 for w in fresh):
+                    _stop(p)
+                    print(f"{rx.host}:{rx.port} connected but sent nothing in "
+                          f"{SILENT_AFTER:.0f} s, so it was dropped; its owner may limit "
+                          "recording programs", file=sys.stderr)
+        time.sleep(poll)
 
 
 def record(
@@ -91,30 +144,28 @@ def record(
                 "wsprpool",
                 "--connect-retries",
                 "2",
+                # kiwiclient retries a full receiver forever unless this is above 0
                 "--busy-retries",
-                "0",
+                "1",
+                # the session-ended message is logged at info level
+                "--log-level",
+                "info",
             ]
             # kiwirecorder logs every GPS block; a pipe nobody reads fills up and stalls it
             with open(d / "kiwirecorder.log", "w") as log:
                 procs[rx] = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
-        for p in procs.values():
-            try:
-                p.wait(timeout=max(1.0, deadline - time.time()))
-            except subprocess.TimeoutExpired:
-                pass
+        _watch(procs, out, start, deadline)
     finally:
         # a stuck connection still holds one of the owner's few slots
         for p in procs.values():
-            if p.poll() is None:
-                p.kill()
-                p.wait()
+            _stop(p)
 
     files = {}
     for rx, p in procs.items():
         # the work directory may hold wavs from an earlier run
         wavs = [w for w in (out / rx.label).glob("*.wav") if w.stat().st_mtime >= start - 30]
         if wavs:
-            files[rx] = max(wavs, key=lambda w: w.stat().st_mtime)
+            files[rx] = max(wavs, key=lambda w: w.stat().st_size)
         else:
             log_text = (out / rx.label / "kiwirecorder.log").read_text(errors="replace")
             tail = " | ".join(log_text.strip().splitlines()[-3:])

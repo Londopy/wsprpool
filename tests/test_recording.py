@@ -1,4 +1,5 @@
 import struct
+import time
 import zipfile
 from datetime import datetime, timezone
 
@@ -8,7 +9,10 @@ import pytest
 from wsprpool import Message, decode_slot
 from wsprpool._cli import _tag
 from wsprpool._demod import TONE_OFFSETS, baseband
-from wsprpool._kiwi import GPS_EPOCH, WEEK, Receiver, parse_wav, timebase
+from wsprpool import _kiwi
+from wsprpool._kiwi import (
+    GPS_EPOCH, WEEK, Receiver, _watch, parse_wav, record, timebase, unusable,
+)
 from wsprpool._session import load, save, slots
 from wsprpool._wspr import symbols
 
@@ -118,3 +122,63 @@ def test_single_receiver_slots_are_not_called_combined():
     assert _tag(2, [], True) == "combined only"
     assert _tag(2, ["a"], True) == "both"
     assert _tag(2, ["a"], False) == "alone only"
+
+
+def test_receivers_that_refuse_recording_programs_are_skipped():
+    ok = {"status": "active", "offline": "no", "gps_good": "6", "users": "1", "users_max": "8",
+          "ext_api": "4"}
+    assert unusable(ok) is None
+    assert "doesn't allow recording programs" in unusable({**ok, "ext_api": "0"})
+    assert "no GPS" in unusable({**ok, "gps_good": "0"})
+    assert "slots in use" in unusable({**ok, "users": "8"})
+
+
+class _Proc:
+    def __init__(self):
+        self.killed = False
+
+    def poll(self):
+        return -9 if self.killed else None
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self):
+        return -9
+
+
+def test_watch_stops_receivers_that_end_the_session_or_never_send(tmp_path, capsys):
+    talking, silent, cut = (Receiver(h) for h in ("talks.example", "silent.example", "cut.example"))
+    ended = ("INFO cut.example:8073 server closed the connection cleanly. "
+             "Reconnecting after 5 seconds.")
+    for rx, wav, log in ((talking, 100_000, "Block: 1"), (silent, 44, ""), (cut, 100_000, ended)):
+        (tmp_path / rx.label).mkdir()
+        (tmp_path / rx.label / "x_iq.wav").write_bytes(bytes(wav))
+        (tmp_path / rx.label / "kiwirecorder.log").write_text(log)
+    procs = {rx: _Proc() for rx in (talking, silent, cut)}
+    _watch(procs, tmp_path, time.time() - 60, time.time() + 0.3, poll=0.05)
+    assert [procs[rx].killed for rx in (talking, silent, cut)] == [False, True, True]
+    err = capsys.readouterr().err
+    assert "silent.example:8073 connected but sent nothing" in err
+    assert "cut.example:8073: server closed the connection cleanly after 1 min" in err
+    assert "not reconnecting" in err
+
+
+def test_recorder_logs_session_ends_and_gives_up_on_a_full_receiver(tmp_path, monkeypatch):
+    seen = []
+
+    class Quiet(_Proc):
+        returncode = 0
+
+        def __init__(self, cmd, **kw):
+            super().__init__()
+            seen.append(cmd)
+
+    monkeypatch.setattr(_kiwi.subprocess, "Popen", Quiet)
+    monkeypatch.setattr(_kiwi.time, "sleep", lambda s: None)
+    monkeypatch.setattr(_kiwi, "_watch", lambda *a, **k: None)
+    record([Receiver("a.example")], 14097.1, 1, tmp_path, tmp_path / "kiwirecorder.py")
+    cmd = seen[0]
+    # _watch finds session ends in the info-level log; 1 is the lowest count that stops retrying
+    assert cmd[cmd.index("--log-level") + 1] == "info"
+    assert cmd[cmd.index("--busy-retries") + 1] == "1"
