@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "wsprpool"
-version = "0.1.0"
+version = "0.2.0"
 description = "Decode WSPR by adding the soft decisions of several KiwiSDRs"
 readme = "README.md"
 license = "MIT"

@@ -8,6 +8,38 @@ what appears on its GitHub release page. Validated in CI by
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-19
+
+### Added
+
+- Each receiver's own frequency offset: in the combination, a receiver that clearly sees
+  the signal is demodulated at its own frequency instead of the joint one, with a second
+  try at one shared frequency in case its own peak was a neighbour. In simulation with
+  three receivers 0.4 Hz apart, the decode rate near threshold went from 21 to 38 out
+  of 40.
+- `wsprpool sim --shared`: a share of noise common to every receiver, like interference
+  that reaches all the sites at once. `--freq-spread` sets how far apart the receivers'
+  oscillators are.
+- `wsprpool record` skips receivers whose owners allow no recording programs, and drops a
+  receiver that connects but sends nothing within 45 seconds, so it doesn't hold a slot.
+- A real 2-minute slot from three KiwiSDRs is kept as a test fixture.
+- `wsprpool decode` measures how correlated the receivers' LLR errors are at combined
+  spots, which shows how much shared noise costs.
+- `wsprpool sim` prints one standard error for every threshold and gain.
+
+### Changed
+
+- The README explains why LLRs are added without a separate SNR weight, says which
+  combined-only spots are confirmed, and adds prior art and a section on rules. It also
+  has simulations with slow fading, shared noise and 10 and 16 receivers, and an hour
+  recorded from three KiwiSDRs in Australia and New Zealand.
+
+### Fixed
+
+- `wsprpool record` reconnected when a receiver ended the session at its owner's time
+  limit, and kept recording past it. It now stops that receiver and keeps what was
+  recorded. A full receiver was also retried forever; now it is skipped.
+
 ## [0.1.0] - 2026-11-19
 
 ### Added
@@ -31,5 +63,6 @@ what appears on its GitHub release page. Validated in CI by
 - A drift search of up to 4 Hz over the transmission, with the drift printed for each spot.
 - `wsprpool decode --csv` writes the spots to a CSV file as well.
 
-[Unreleased]: https://github.com/Londopy/wsprpool/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Londopy/wsprpool/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Londopy/wsprpool/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Londopy/wsprpool/releases/tag/v0.1.0
