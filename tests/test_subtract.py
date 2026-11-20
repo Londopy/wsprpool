@@ -33,3 +33,9 @@ def test_removal_follows_fading():
 def test_leaves_a_neighbouring_station_alone():
     x = slot(OTHER, 30.2, [Channel(-12.0)], rng=np.random.default_rng(2))[0]
     assert np.array_equal(subtract(x, symbols(MSG), 30.0, START), x)
+
+
+def test_removal_follows_drift():
+    x = slot(MSG, 30.0, [Channel(0.0)], rng=np.random.default_rng(3), noise=False, drift=3.0)[0]
+    assert _left(x, subtract(x, symbols(MSG), 30.0, START, 3.0)) < 1e-4
+    assert _left(x, subtract(x, symbols(MSG), 30.0, START)) > 0.1

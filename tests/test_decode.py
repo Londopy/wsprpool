@@ -94,3 +94,11 @@ def test_shadow_of_a_decode_is_dropped():
     a, b = {"x": real}, {"y": junk, "z": apart}
     _drop_shadows([a, b])
     assert list(a.values()) == [real] and list(b.values()) == [apart]
+
+
+@pytest.mark.parametrize("drift", [3.0, -3.5])
+def test_drifting_transmitter_is_found_with_its_drift(drift):
+    xs = slot(MSG, 30.0, [Channel(-25.0)], rng=np.random.default_rng(7), drift=drift)
+    spots = decode_slot({"a": xs[0]}).combined
+    assert [s.message for s in spots] == [MSG]
+    assert spots[0].drift == pytest.approx(drift, abs=0.25)

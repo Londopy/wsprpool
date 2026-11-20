@@ -15,6 +15,8 @@ SPS = 256
 WINDOW = int(120 * FS)
 TONE_OFFSETS = (np.arange(4) - 1.5) * TONE_SPACING
 SIGN = 2.0 * SYNC - 1.0
+# each tone's offset from the centre, mixed down once for every window
+_OFFSETS = np.exp(-2j * np.pi * np.outer(TONE_OFFSETS, np.arange(WINDOW)) / FS)
 
 
 def baseband(iq: np.ndarray, fs: float, shift_hz: float = 0.0) -> tuple[np.ndarray, float]:
@@ -58,13 +60,23 @@ def peaks(freqs: np.ndarray, spec: np.ndarray, limit: float = 150.0,
     return [float(freqs[i]) for i in cand[:most]]
 
 
-def tone_sums(x: np.ndarray, f: float, lags: np.ndarray) -> np.ndarray:
-    """Complex symbol integrals, shape (4 tones, len(lags), 162), for a signal centred on f."""
-    n = np.arange(len(x))
-    tones = f + TONE_OFFSETS
-    y = x[None, :] * np.exp(-2j * np.pi * np.outer(tones, n) / FS)
+def tone_sums(x: np.ndarray, f: float, lags: np.ndarray, drift: float = 0.0) -> np.ndarray:
+    """Complex symbol integrals, shape (4 tones, len(lags), 162), for a signal centred on f.
+
+    drift is how far the transmitter's frequency moves from the first symbol to the last.
+    """
+    # only the samples some lag's symbols cover
+    lo, hi = int(lags.min()), min(len(x), int(lags.max()) + NSYM * SPS)
+    n = np.arange(lo, hi)
+    phase = f * n
+    if drift:
+        mid = (lo + int(lags.max())) / 2 + NSYM * SPS / 2
+        phase = phase + drift / (NSYM * SPS) * (n - mid) ** 2 / 2
+    offsets = _OFFSETS[:, lo:hi] if hi <= WINDOW else np.exp(
+        -2j * np.pi * np.outer(TONE_OFFSETS, n) / FS)
+    y = offsets * (x[lo:hi] * np.exp(-2j * np.pi * phase / FS))
     cs = np.concatenate([np.zeros((4, 1), complex), np.cumsum(y, axis=1)], axis=1)
-    starts = lags[:, None] + SPS * np.arange(NSYM)[None, :]
+    starts = lags[:, None] - lo + SPS * np.arange(NSYM)[None, :]
     return cs[:, starts + SPS] - cs[:, starts]
 
 
@@ -114,7 +126,8 @@ def soft_bits(c: np.ndarray, smooth: int = 15) -> tuple[np.ndarray, float]:
     return llr, snr
 
 
-def fit(x: np.ndarray, tones: np.ndarray, f: float, lag: int) -> tuple[float, int, float]:
+def fit(x: np.ndarray, tones: np.ndarray, f: float, lag: int,
+        drift: float = 0.0) -> tuple[float, int, float]:
     """Best frequency and start for a known transmission near (f, lag), and how sure it's there.
 
     The last value is a z-score: how often the transmitted tone beats the tone the other
@@ -130,12 +143,12 @@ def fit(x: np.ndarray, tones: np.ndarray, f: float, lag: int) -> tuple[float, in
     best = (f, int(lags[0]), -np.inf)
     for step in (np.arange(-0.25, 0.251, 0.05), np.arange(-0.04, 0.041, 0.01)):
         for ff in best[0] + step:
-            known = (np.abs(tone_sums(x, ff, lags)[tones, :, i]) ** 2).sum(axis=0)
+            known = (np.abs(tone_sums(x, ff, lags, drift)[tones, :, i]) ** 2).sum(axis=0)
             j = int(np.argmax(known))
             if known[j] > best[2]:
                 best = (float(ff), int(lags[j]), float(known[j]))
     f, lag = best[0], best[1]
-    p = np.abs(tone_sums(x, f, np.array([lag]))[:, 0, :]) ** 2
+    p = np.abs(tone_sums(x, f, np.array([lag]), drift)[:, 0, :]) ** 2
     agree = int(np.sum(p[tones, i] > p[tones ^ 2, i]))
     return f, lag, (agree - NSYM / 2) / np.sqrt(NSYM / 4)
 
@@ -149,14 +162,17 @@ def _smooth(env: np.ndarray, width: int) -> np.ndarray:
     return (cs[hi] - cs[lo]) / (hi - lo)
 
 
-def _removed(x: np.ndarray, tones: np.ndarray, f: float, lag: int) -> np.ndarray:
+def _removed(x: np.ndarray, tones: np.ndarray, f: float, lag: int,
+             drift: float = 0.0) -> np.ndarray:
     """The part of x[lag:] that follows the transmission's tones, as a slowly varying envelope."""
     n = min(NSYM * SPS, len(x) - lag)
-    ref = np.exp(2j * np.pi * np.cumsum(np.repeat(f + TONE_OFFSETS[tones], SPS)[:n]) / FS)
+    k = np.arange(NSYM * SPS) - NSYM * SPS / 2
+    inst = np.repeat(f + TONE_OFFSETS[tones], SPS) + drift * k / (NSYM * SPS)
+    ref = np.exp(2j * np.pi * np.cumsum(inst[:n]) / FS)
     return _smooth(x[lag: lag + n] * np.conj(ref), int(FS)) * ref
 
 
-def subtract(x: np.ndarray, tones: np.ndarray, f: float, lag: int,
+def subtract(x: np.ndarray, tones: np.ndarray, f: float, lag: int, drift: float = 0.0,
              min_z: float = 3.0) -> np.ndarray:
     """x with a known transmission removed, or x unchanged if it isn't clearly there.
 
@@ -166,11 +182,11 @@ def subtract(x: np.ndarray, tones: np.ndarray, f: float, lag: int,
     then trimmed to the sample by whichever leaves the least energy behind, since a few
     samples off at every tone change limits the removal to about 20 dB.
     """
-    f, lag, z = fit(x, tones, f, lag)
+    f, lag, z = fit(x, tones, f, lag, drift)
     if z < min_z:
         return x
     def gain(m: int) -> tuple[float, int, np.ndarray]:
-        r = _removed(x, tones, f, m)
+        r = _removed(x, tones, f, m, drift)
         seg = x[m: m + len(r)]
         return float(np.sum(np.abs(seg) ** 2) - np.sum(np.abs(seg - r) ** 2)), m, r
 

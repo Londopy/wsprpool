@@ -19,10 +19,14 @@ class Channel:
     doppler: float = 0.0
 
 
-def waveform(msg: Message, freq: float) -> np.ndarray:
-    """Continuous-phase 4-FSK at 375 Hz baseband with unit amplitude."""
+def waveform(msg: Message, freq: float, drift: float = 0.0) -> np.ndarray:
+    """Continuous-phase 4-FSK at 375 Hz baseband with unit amplitude.
+
+    drift moves the frequency linearly by that many Hz from the first symbol to the last.
+    """
     tones = symbols(msg)
-    inst = np.repeat(freq + TONE_OFFSETS[tones], SPS)
+    k = np.arange(len(tones) * SPS) - len(tones) * SPS / 2
+    inst = np.repeat(freq + TONE_OFFSETS[tones], SPS) + drift * k / (len(tones) * SPS)
     return np.exp(2j * np.pi * np.cumsum(inst) / FS)
 
 
@@ -45,6 +49,7 @@ def slot(
     start: float = 1.0,
     rng: np.random.Generator | None = None,
     noise: bool = True,
+    drift: float = 0.0,
 ) -> list[np.ndarray]:
     """One decode window per receiver: noise of unit variance per sample plus the signal.
 
@@ -54,7 +59,7 @@ def slot(
     rng = rng or np.random.default_rng()
     out = []
     for ch in channels:
-        sig = waveform(msg, freq + ch.freq_error)
+        sig = waveform(msg, freq + ch.freq_error, drift)
         amp = np.sqrt(10 ** (ch.snr_db / 10) * 2500 / FS)
         sig = amp * sig * fading(len(sig), ch.doppler, rng)
         x = np.zeros(WINDOW, complex)
