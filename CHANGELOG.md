@@ -8,6 +8,27 @@ what appears on its GitHub release page. Validated in CI by
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-23
+
+### Added
+
+- `wsprpool ui`: a local web page to pick KiwiSDRs on a map or in a list, record a session
+  with a countdown to the slot and each receiver's progress, decode it slot by slot into a
+  table that highlights combined-only spots and their wspr.live confirmations, and run the
+  simulator as a chart. It follows the system light or dark setting, listens on 127.0.0.1
+  only, and needs a per-run key on every API request. A busy `--port` fails with a clear
+  message instead of sharing the port with another program on Windows.
+- `wsprpool sim --weighting snr|equal` and `--snr-spread`: measure the plain LLR sum
+  against SNR-weighted and equal-weighted combining on receivers of unequal strength.
+
+### Changed
+
+- `decode` and `sim` share their logic with the page; their output is unchanged.
+- A simulation stopped from the page stops after the current slot, not the current point.
+- `record` drops a receiver that keeps the connection but stops sending samples, keeping
+  what it sent, and says when a recorder quits on its own well before the end.
+- Picking the same receiver twice records it once.
+
 ## [0.2.0] - 2026-11-19
 
 ### Added
@@ -63,6 +84,7 @@ what appears on its GitHub release page. Validated in CI by
 - A drift search of up to 4 Hz over the transmission, with the drift printed for each spot.
 - `wsprpool decode --csv` writes the spots to a CSV file as well.
 
-[Unreleased]: https://github.com/Londopy/wsprpool/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Londopy/wsprpool/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Londopy/wsprpool/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Londopy/wsprpool/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Londopy/wsprpool/releases/tag/v0.1.0

@@ -56,10 +56,43 @@ set WSPRPOOL_KIWIRECORDER=C:\path\to\kiwiclient\kiwirecorder.py
 
 ## Usage
 
+### In your browser
+
+```console
+wsprpool ui
+```
+
+This opens a page served from your own machine with everything below in one place:
+
+- **Receivers & record.** The public KiwiSDR list, on a map drawn on the Maidenhead grid
+  and in a searchable list. Receivers that can't record right now (no GPS fix, full,
+  owner allows no recording programs, frequency not covered) are marked with the reason.
+  Pick two to five and set the length; before you start, the page says which frequency,
+  which UTC minutes and which file the session will use, and each pick shows its
+  listeners and time limit. Then a countdown runs to the slot, and each receiver's
+  progress shows as it records. The recorder follows the same rules as `wsprpool record`,
+  and never writes over an existing session file.
+- **Decode.** Pick a `.londopy` session and watch it decode slot by slot. The result
+  opens with one sentence saying what the combination found that no receiver did alone,
+  and how much of it wspr.live confirms. The spot table shows which receivers decoded
+  each spot alone, with combined-only spots highlighted and their wspr.live reporter
+  count. It can be filtered, and saved as CSV with the same columns as `decode --csv`.
+- **Simulate.** The same settings as `wsprpool sim`, drawn as decode-rate curves, with
+  the threshold and gain table underneath.
+
+The page follows your system's light or dark setting. The server listens on 127.0.0.1
+only, and the address it prints carries a random key that every API request has to
+present, so other sites open in your browser can't drive it. The page moves the key out
+of the address bar as soon as it loads. Session files go in the folder you
+start it from, or `--dir`. Stop it with Ctrl+C; a recording in progress is stopped
+cleanly and keeps what it has. The receiver list comes from
+[rx.linkfanel.net](http://rx.linkfanel.net/), which republishes the one at
+[kiwisdr.com/public](http://kiwisdr.com/public/).
+
 ### Measure the gain on synthetic signals
 
 ```console
-wsprpool sim --receivers 1,2,4,8 --snr=-37:-27 --trials 20
+wsprpool sim --receivers 1,2,4 --snr=-36:-26 --trials 20
 wsprpool sim --receivers 1,2,4 --doppler 0.2
 ```
 
@@ -80,10 +113,11 @@ wsprpool record kiwisdr.example.org:8073 other.example.net:8073 -o evening.londo
 Before connecting, wsprpool checks each receiver's `/status` page. It skips any that are
 offline, full, without a GPS fix (a receiver without GPS timestamps can't be lined up with
 the others), or whose owner allows no recording programs. Once recording, it drops a
-receiver that connects but sends nothing within 45 seconds, and stops one as soon as the
-receiver ends the session, usually at the owner's time limit, keeping what it recorded.
-kiwiclient on its own would reconnect and carry on past the limit; wsprpool doesn't. Recording starts just before the next even minute and runs for
-`--minutes`. The default `--freq 14097.1` kHz centres the 200 Hz-wide 20 m WSPR segment.
+receiver that sends nothing for 45 seconds, at the start or later on, and stops one as
+soon as the receiver ends the session, usually at the owner's time limit, keeping what it
+recorded. kiwiclient on its own would reconnect and carry on past the limit; wsprpool
+doesn't. If a recorder quits by itself early, wsprpool says so and names its log.
+Recording starts just before the next even minute and runs for `--minutes`. The default `--freq 14097.1` kHz centres the 200 Hz-wide 20 m WSPR segment.
 
 The result is one `.londopy` file holding every receiver's GPS-stamped IQ wav, so a
 session can be shared and decoded again later. It's a zip with a `londopy.toml` and a
@@ -128,16 +162,27 @@ Every simulated point is 20 slots. The 50% thresholds carry one standard error f
 binomial spread of those 20 (`wsprpool sim` prints it); the 90% points read off the same
 tables are rougher.
 
-**Simulated, plain noise.** The SNR where half the slots decode:
+**Simulated, plain noise.** The SNR where half the slots decode, each row from its own
+run over the SNRs around its threshold, and every gain measured against the same
+one-receiver run:
+
+```console
+wsprpool sim --receivers 1 --snr=-33:-26 --trials 20
+wsprpool sim --receivers 2 --snr=-34:-29 --trials 20
+wsprpool sim --receivers 4 --snr=-36:-31 --trials 20
+wsprpool sim --receivers 8 --snr=-37:-32 --trials 20
+wsprpool sim --receivers 10 --snr=-38:-33 --trials 20
+wsprpool sim --receivers 16 --snr=-39:-33 --trials 20
+```
 
 | Receivers | 50% threshold | Gain | Ideal |
 |---|---|---|---|
-| 1 | -29.0 ± 0.3 dB | | |
-| 2 | -31.5 ± 0.2 dB | 2.5 dB | 3 dB |
-| 4 | -33.2 ± 0.2 dB | 4.2 dB | 6 dB |
-| 8 | -34.7 ± 0.2 dB | 5.2 dB (against -29.5 for one in that run) | 9 dB |
-| 10 | -35.4 ± 0.2 dB | 6.5 dB (against -28.9 in that run) | 10 dB |
-| 16 | -35.8 ± 0.2 dB | 6.9 dB | 12 dB |
+| 1 | -29.1 ± 0.3 dB | | |
+| 2 | -31.5 ± 0.2 dB | 2.4 ± 0.4 dB | 3 dB |
+| 4 | -33.3 ± 0.2 dB | 4.2 ± 0.4 dB | 6 dB |
+| 8 | -34.7 ± 0.2 dB | 5.6 ± 0.4 dB | 9 dB |
+| 10 | -35.2 ± 0.2 dB | 6.1 ± 0.4 dB | 10 dB |
+| 16 | -36.3 ± 0.2 dB | 7.2 ± 0.4 dB | 12 dB |
 
 The gain flattens as receivers are added, because each one demodulates noncoherently on
 its own and noncoherent detection loses more the weaker the signal is at each site. With
@@ -160,8 +205,27 @@ interleaving and code already spread each message over the whole 2 minutes, so a
 site adds about what it adds in plain noise. With slow fading one fade can last a whole
 transmission, and a single receiver still misses more than one slot in ten 10 dB above
 its 50% point. A second receiver is rarely in the same fade: at 90% reliability two
-receivers gain about 5 dB and four about 13 dB, far more than the 3 and 6 dB that equal
-receivers in plain noise would give. That is the extra gain diversity brings on HF.
+receivers gain at least 5 dB and four at least 13 dB, far more than the 3 and 6 dB that equal
+receivers in plain noise would give. Those two figures are lower bounds: one receiver
+never reached 90% within the tested range, so its true 90% point sits above -17 dB. That
+is the extra gain diversity brings on HF.
+
+**Simulated, SNR weighting.** Four receivers whose SNRs are spread evenly over 12 dB,
+so the best sits 6 dB above the stated SNR and the worst 6 dB below, decoded three ways
+from the same simulated slots:
+
+```console
+wsprpool sim --receivers 4 --snr=-42:-32 --trials 20 --snr-spread 12 --weighting llr
+```
+
+| Combining | 50% threshold |
+|---|---|
+| LLRs added as they are (`llr`, what wsprpool does) | -36.1 ± 0.2 dB |
+| LLRs also multiplied by each receiver's SNR (`snr`) | -35.7 ± 0.4 dB |
+| Every receiver given the same weight (`equal`) | -33.2 ± 0.3 dB |
+
+Weighting by SNR on top of the LLRs gains nothing, and treating the receivers as equal
+costs about 3 dB. The exact LLRs already weight each receiver by what it heard.
 
 **Simulated, shared noise.** With 30% of every receiver's noise power common to all of
 them (`--shared 0.3`), four receivers gain 3.8 ± 0.3 dB over one, against 4.2 dB with
@@ -169,10 +233,10 @@ independent noise. The real sessions below measure how correlated real receivers
 
 **Real, 2026-11-19 20:30 to 20:38 UTC**, 20 m, three KiwiSDRs (in the FN33, FM18 and EM96 grid squares),
 four slots: 72 spots were decoded by at least one receiver alone and 75 by the combination.
-Nine spots were decoded only by the combination, and 8 of the 9 are confirmed: wspr.live
-has 43 or more other stations reporting each one with the same grid and power (KN2M,
-N0STP, N5UTV, WD5TX, K5EMI, K7CMI, VE9XYZ, and K0CFW's hashed type 3 message). The
-ninth, `7F3NQR JH81 57` at metric 11.4, was reported by nobody and is almost certainly a
+Eight spots that only the combination decoded are confirmed: wspr.live has 43 or more
+other stations reporting each one with the same grid and power (KN2M, N0STP, N5UTV,
+WD5TX, K5EMI, K7CMI, VE9XYZ, and K0CFW's hashed type 3 message). One more combined-only
+decode, `7F3NQR JH81 57` at metric 11.4, was reported by nobody and is almost certainly a
 false decode; a real spot in the same session scored 13.5, so no metric cutoff separates
 the two (see Limits). Every other spot was reported by at least 11 other stations. The
 receivers' LLR errors at combined spots correlate by 0.09 on average over 113 pairs, so
@@ -187,22 +251,22 @@ end every session at their owners' 30-minute limit, so the first 30 minutes have
 three receivers and the second only the Ararat one, which turned out to hear almost
 nothing on 20 m that night (6 spots in the whole hour). In practice this is a two-receiver
 combination for 15 slots. 118 spots were decoded by at least one receiver alone and 125
-by the combination. Nine were decoded only by the combination, and 7 of the 9 are
-confirmed on wspr.live by 1 to 37 other stations (KH6TZ, KO4UST, HK3LRB, KI6DS twice,
-TI4JWC and HP2DFA). The other two, `CT9/DL7VXX 33` at metric 53.1 and `TC4FST JD71 30`
+by the combination. Seven spots that only the combination decoded are confirmed on
+wspr.live by 1 to 37 other stations (KH6TZ, KO4UST, HK3LRB, KI6DS twice, TI4JWC and
+HP2DFA). Two more combined-only decodes, `CT9/DL7VXX 33` at metric 53.1 and `TC4FST JD71 30`
 at 14.1, were reported by nobody on 20 m within the hour and are probably false decodes;
 the first shows that a wrong message can score well above the cutoff. The LLR error
 correlation was 0.00 over 122 receiver pairs. Decoding took about 12 minutes.
 
 The US session, decoded with fewer features:
 
-| Decoder | Alone | Combined | Combined only |
-|---|---|---|---|
-| Type 1 only, one pass, no drift search | 54 | 49 | 2 |
-| Plus subtraction and a second pass | 60 | 58 | 5 |
-| Plus type 2 and 3 messages | 67 | 64 | 4 |
-| Plus the drift search (0.1.0) | 72 | 72 | 6 |
-| Plus each receiver's own frequency (this release) | 72 | 75 | 9 |
+| Decoder | Alone | Combined | Combined only, confirmed | Combined only, unconfirmed |
+|---|---|---|---|---|
+| Type 1 only, one pass, no drift search | 54 | 49 | 2 | 0 |
+| Plus subtraction and a second pass | 60 | 58 | 5 | 0 |
+| Plus type 2 and 3 messages | 67 | 64 | 4 | 0 |
+| Plus the drift search (0.1.0) | 72 | 72 | 5 | 1 |
+| Plus each receiver's own frequency (0.2.0) | 72 | 75 | 8 | 1 |
 
 The combined-only count can drop as the decoder improves, because a better single-receiver
 decode moves a spot from "combined only" to "both". Decoding the four slots took about
@@ -258,8 +322,9 @@ recordings running on popular receivers. wsprpool connects with the user name
    detection loses more as SNR drops), and one in a fade, or hearing nothing, adds almost
    nothing. For independent receivers whose LLRs are calibrated, adding them is the
    optimal combination, and multiplying by SNR again would count each receiver's SNR
-   twice. In simulation they are close to calibrated in plain noise and somewhat
-   overconfident in fast fading.
+   twice. In simulation the LLRs are close to calibrated in plain noise and somewhat
+   overconfident in fast fading, and the comparison under Results measures the plain sum
+   against both alternatives.
 7. **Subtract and decode again.** Each decoded message is re-encoded, and its tones are
    fitted to every receiver's samples, tracking amplitude and phase over one-second
    windows so fading is followed. A fit only counts if the known tone beats the tone for
@@ -308,13 +373,16 @@ session above.
   at least one receiver decoded on its own. We found no published WSPR decoder that adds
   soft decisions across receivers.
 - **Diversity combining.** Maximal-ratio combining (D. G. Brennan, "Linear diversity
-  combining techniques", Proc. IRE, 1959) weights and adds branches before detection.
-  Arrays in space links do this coherently: for Voyager 2 at Neptune in 1989, NASA added
-  the Very Large Array's antennas to the Deep Space Network's after phasing them in
-  real time. Combining soft decisions after noncoherent detection, as here, needs no phase
-  agreement between sites, which is what makes receivers thousands of kilometres apart
-  usable. Patents describe the same for noncoherent links in general, for example US
-  10,243,696 (diversity combining of noncoherently modulated LDPC codes).
+  combining techniques", *Proceedings of the IRE* 47(6), 1075-1102, June 1959) weights
+  and adds branches before detection. Arrays in space links do this coherently: for
+  Voyager 2 at Neptune in 1989, NASA added the Very Large Array's antennas to the Deep
+  Space Network's after phasing them in real time
+  ([JPL report](https://ntrs.nasa.gov/citations/19890000836)). Combining soft decisions
+  after noncoherent detection, as here, needs no phase agreement between sites, which is
+  what makes receivers thousands of kilometres apart usable. The same idea is patented
+  for noncoherent links in general:
+  [US 10,243,696](https://patents.google.com/patent/US10243696), "Diversity combining of
+  non-coherently modulated LDPC codes in wireless communications" (2019).
 
 ## Rules
 
