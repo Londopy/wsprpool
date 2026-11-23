@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from wsprpool import Message, decode_slot, symbols
-from wsprpool._decode import Spot, _drop_shadows, _offsets, llr_correlation
+from wsprpool._decode import Spot, _drop_shadows, _offsets, combine, llr_correlation
 from wsprpool._sim import Channel, slot
 from wsprpool._wspr import SYNC
 
@@ -154,3 +154,29 @@ def test_a_neighbour_heard_by_one_receiver_doesnt_keep_the_pair_from_combining(s
     b = b + slot(other, 30.8, [Channel(-18.0)], rng=rng, noise=False)[0]
     res = decode_slot({"a": a, "b": b}, alone=False, passes=1)
     assert MSG in [s.message for s in res.combined]
+
+
+def test_combine_weights_the_way_each_rule_says():
+    each = {"loud": np.array([4.0, -4.0]), "quiet": np.array([1.0, 1.0])}
+    snr = {"loud": 0.0, "quiet": -10.0}
+    assert combine(each, snr, "llr").tolist() == [5.0, -3.0]
+    # SNR weights 1 and 0.1, rescaled to average 1
+    assert combine(each, snr, "snr") == pytest.approx(np.array([4.0, -4.0]) / 0.55 * 1.0
+                                                      + np.array([1.0, 1.0]) * 0.1 / 0.55)
+    # both scaled to the mean size 2.5
+    assert combine(each, snr, "equal") == pytest.approx([2.5 + 2.5, -2.5 + 2.5])
+    with pytest.raises(ValueError, match="unknown weighting"):
+        combine(each, snr, "loudest")
+
+
+def test_plain_llr_sum_ignores_deaf_receivers_but_equal_weights_drown_the_good_one():
+    rng = np.random.default_rng(0)
+    windows = {"good": slot(MSG, 30.0, [Channel(-27.0)], rng=rng)[0]}
+    for i in range(3):
+        windows[f"deaf{i}"] = slot(MSG, 30.0, [Channel(-80.0)], rng=rng)[0]
+
+    def found(weighting):
+        res = decode_slot(windows, alone=False, passes=1, weighting=weighting)
+        return MSG in [s.message for s in res.combined]
+
+    assert found("llr") and not found("equal")

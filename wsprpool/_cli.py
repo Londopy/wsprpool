@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from ._version import __version__
-from ._decode import Slot, Spot
+from ._decode import WEIGHTINGS, Slot, Spot
 from ._kiwi import Receiver, record, usable
 from ._report import Entry, decode_session
 from ._session import load, save
@@ -30,10 +30,14 @@ def cmd_sim(a: argparse.Namespace) -> int:
         raise ValueError(f"--shared is a fraction between 0 and 1, not {a.shared:g}")
     if not 0 <= a.freq_spread < float("inf"):
         raise ValueError(f"--freq-spread is a spread in Hz, 0 or more, not {a.freq_spread:g}")
+    if not 0 <= a.snr_spread <= 40:
+        raise ValueError(f"--snr-spread is 0 to 40 dB, not {a.snr_spread:g}")
     ns = list(dict.fromkeys(int(n) for n in a.receivers.split(",")))
     snrs = _floats(a.snr)
     print(f"decode rate over {a.trials} slots per cell, doppler {a.doppler} Hz, "
-          f"shared noise {a.shared:g}, receiver frequency spread {a.freq_spread:g} Hz")
+          f"shared noise {a.shared:g}, receiver frequency spread {a.freq_spread:g} Hz"
+          + (f", receiver SNRs spread over {a.snr_spread:g} dB, {a.weighting} weighting"
+             if a.snr_spread or a.weighting != "llr" else ""))
     print("snr dB  " + "".join(f"{f'N={n}':>8}" for n in ns))
     row: list[float] = []
 
@@ -43,7 +47,8 @@ def cmd_sim(a: argparse.Namespace) -> int:
             print(f"{snr:6.1f}  " + "".join(f"{r:8.2f}" for r in row), flush=True)
             row.clear()
 
-    rates = sweep(ns, snrs, a.trials, a.doppler, a.shared, a.freq_spread, a.seed, show)
+    rates = sweep(ns, snrs, a.trials, a.doppler, a.shared, a.freq_spread, a.seed, show,
+                  snr_spread=a.snr_spread, weighting=a.weighting)
     print()
     print("50% threshold and gain over the first column, each with one standard error "
           "(ideal gain is 10 log10 N)")
@@ -174,6 +179,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="fraction of noise power that is the same at every receiver (0 to 1)")
     s.add_argument("--freq-spread", type=float, default=0.03,
                    help="sd in Hz of each receiver's own frequency error")
+    s.add_argument("--snr-spread", type=float, default=0.0,
+                   help="space the receivers' SNRs evenly over this many dB around --snr")
+    s.add_argument("--weighting", choices=WEIGHTINGS, default="llr",
+                   help="how receivers' LLRs are summed: as they are (llr), times each one's "
+                        "SNR (snr), or scaled to the same size (equal)")
     s.add_argument("--seed", type=int, default=1)
     s.set_defaults(fn=cmd_sim)
 

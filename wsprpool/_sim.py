@@ -93,23 +93,27 @@ def random_message(rng: np.random.Generator) -> Message:
 def decode_rate(
     n: int, snr_db: float, trials: int, doppler: float, rng: np.random.Generator,
     shared: float = 0.0, freq_spread: float = 0.03, stop: threading.Event | None = None,
+    snr_spread: float = 0.0, weighting: str = "llr",
 ) -> float | None:
     """Fraction of slots where the transmitted message is decoded by n combined receivers.
 
-    Each receiver's oscillator is off by a normal draw with sd freq_spread Hz. None when
-    stop is set before the last slot.
+    Each receiver's oscillator is off by a normal draw with sd freq_spread Hz. snr_spread
+    spaces the receivers' SNRs evenly over that many dB around snr_db. None when stop is
+    set before the last slot.
     """
+    offsets = np.linspace(-snr_spread / 2, snr_spread / 2, n) if n > 1 else np.zeros(1)
     hits = 0
     for _ in range(trials):
         if stop is not None and stop.is_set():
             return None
         msg = random_message(rng)
         chans = [
-            Channel(snr_db, rng.normal(0, freq_spread), rng.normal(0, 0.01), doppler)
-            for _ in range(n)
+            Channel(snr_db + off, rng.normal(0, freq_spread), rng.normal(0, 0.01), doppler)
+            for off in offsets
         ]
         xs = slot(msg, rng.uniform(-90, 90), chans, rng=rng, shared=shared)
-        spots = decode_slot({str(i): x for i, x in enumerate(xs)}, alone=False, passes=1).combined
+        spots = decode_slot({str(i): x for i, x in enumerate(xs)}, alone=False, passes=1,
+                            weighting=weighting).combined
         hits += any(s.message == msg for s in spots)
     return hits / trials
 
@@ -132,6 +136,8 @@ def sweep(
     seed: int = 1,
     on_rate: Callable[[float, int, float], None] | None = None,
     stop: threading.Event | None = None,
+    snr_spread: float = 0.0,
+    weighting: str = "llr",
 ) -> dict[int, list[float]]:
     """Decode rate for every receiver count at every SNR, in that order.
 
@@ -142,7 +148,8 @@ def sweep(
     rates: dict[int, list[float]] = {n: [] for n in ns}
     for s in snrs:
         for n in ns:
-            rate = decode_rate(n, s, trials, doppler, rng, shared, freq_spread, stop)
+            rate = decode_rate(n, s, trials, doppler, rng, shared, freq_spread, stop,
+                               snr_spread, weighting)
             if rate is None:
                 return rates
             rates[n].append(rate)

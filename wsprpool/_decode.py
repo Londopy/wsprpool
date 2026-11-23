@@ -28,6 +28,7 @@ COARSE_LAGS = np.arange(0, int(5 * FS), 16)
 FINE_DF = np.arange(-0.1, 0.101, 0.025)
 # total frequency change over the transmission
 DRIFTS = np.arange(-4.0, 4.01, 1.0)
+WEIGHTINGS = ("llr", "snr", "equal")
 # a receiver whose own sync score reaches this sees the signal well enough to trust its own
 # frequency in the combination; below it the joint frequency is the better guess
 OWN_SYNC = 6.0
@@ -100,9 +101,31 @@ def _refine(
     return f, lag, drift, best
 
 
+def combine(each: dict[str, np.ndarray], snr: dict[str, float], weighting: str) -> np.ndarray:
+    """Sum the receivers' LLRs.
+
+    "llr" adds them as they are: an exact LLR already weights a receiver by what it heard.
+    "snr" also multiplies each by its measured linear SNR, and "equal" scales each to the
+    same mean size, so the plain sum can be measured against both. Both keep the overall
+    scale, since the Fano decoder reads LLRs as probabilities.
+    """
+    if weighting == "llr":
+        return np.sum(list(each.values()), axis=0)
+    if weighting == "snr":
+        lin = {n: 10 ** (snr[n] / 10) for n in each}
+        mean = np.mean(list(lin.values()))
+        return np.sum([v * lin[n] / mean for n, v in each.items()], axis=0)
+    if weighting == "equal":
+        size = {n: max(float(np.mean(np.abs(v))), 1e-12) for n, v in each.items()}
+        mean = np.mean(list(size.values()))
+        return np.sum([v * mean / size[n] for n, v in each.items()], axis=0)
+    raise ValueError(f"unknown weighting {weighting!r}; use one of {', '.join(WEIGHTINGS)}")
+
+
 def _decode(
     xs: list[np.ndarray], names: list[str], f: float, lag: int, drift: float,
     min_metric: float, max_cycles: int, offsets: list[float] | None = None,
+    weighting: str = "llr",
 ) -> Spot | None:
     """Add every receiver's LLRs at (f, lag, drift) and run the Fano decoder on the sum.
 
@@ -112,7 +135,7 @@ def _decode(
     snr, each = {}, {}
     for n, x, off in zip(names, xs, offsets or [0.0] * len(xs)):
         each[n], snr[n] = soft_bits(tone_sums(x, f + off, np.array([lag]), drift)[:, 0, :])
-    out = fano(deinterleave(np.sum(list(each.values()), axis=0)), max_cycles=max_cycles)
+    out = fano(deinterleave(combine(each, snr, weighting)), max_cycles=max_cycles)
     if out is None or out[1] < min_metric:
         return None
     msg = unpack(out[0])
@@ -159,6 +182,7 @@ def decode_slot(
     max_cycles: int = 10000,
     alone: bool = True,
     passes: int = 2,
+    weighting: str = "llr",
 ) -> Slot:
     """Decode one slot from each receiver alone and from all of them combined.
 
@@ -167,12 +191,13 @@ def decode_slot(
     every decoded signal is subtracted and the rest decoded again, so a weak station
     beside a strong one gets its turn. Each receiver alone, and the combination, only
     subtract what they decoded themselves, so neither borrows the other's results.
+    weighting picks how receivers' LLRs are summed; see combine().
     """
     # an all-zero window is a receiver that dropped out mid-slot
     live = {n: x for n, x in windows.items() if noise_power(x) > 0}
     if not live:
         return Slot({}, [])
-    first = _decode_pass(live, min_metric, max_cycles, alone)
+    first = _decode_pass(live, min_metric, max_cycles, alone, weighting)
     by_rx = {n: {str(s.message): s for s in v} for n, v in first.alone.items()}
     comb = {str(s.message): s for s in first.combined} if len(live) > 1 else {}
 
@@ -187,7 +212,7 @@ def decode_slot(
                     grew |= _keep(found, s)
         if comb:
             rest = {n: _residual(x, list(comb.values())) for n, x in live.items()}
-            for s in _decode_pass(rest, min_metric, max_cycles, False).combined:
+            for s in _decode_pass(rest, min_metric, max_cycles, False, weighting).combined:
                 grew |= _keep(comb, s)
         if not grew:
             break
@@ -240,7 +265,8 @@ def _ordered(d: dict[str, Spot]) -> list[Spot]:
 
 
 def _decode_pass(
-    windows: dict[str, np.ndarray], min_metric: float, max_cycles: int, alone: bool
+    windows: dict[str, np.ndarray], min_metric: float, max_cycles: int, alone: bool,
+    weighting: str = "llr",
 ) -> Slot:
     names = list(windows)
     xs = [windows[n] for n in names]
@@ -277,7 +303,8 @@ def _decode_pass(
                 off = _offsets(own, f, lag)
                 # an own peak can belong to a neighbour, so also try everyone at one frequency
                 for o in [off, None] if any(off) else [None]:
-                    _keep(combined, _decode(xs, names, f, lag, drift, min_metric, max_cycles, o))
+                    _keep(combined, _decode(xs, names, f, lag, drift, min_metric, max_cycles,
+                                            o, weighting))
 
     alone_out = {n: _ordered(d) for n, d in found.items()}
     return Slot(alone_out, _ordered(combined) if len(xs) > 1 else alone_out[names[0]])
