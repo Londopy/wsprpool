@@ -1,4 +1,5 @@
 import struct
+import threading
 import time
 import zipfile
 from datetime import datetime, timezone
@@ -7,7 +8,7 @@ import numpy as np
 import pytest
 
 from wsprpool import Message, decode_slot
-from wsprpool._cli import _tag
+from wsprpool._report import tag
 from wsprpool._demod import TONE_OFFSETS, baseband
 from wsprpool import _kiwi
 from wsprpool._kiwi import (
@@ -118,10 +119,10 @@ def test_baseband_keeps_time_over_a_long_recording():
 
 
 def test_single_receiver_slots_are_not_called_combined():
-    assert _tag(1, ["a"], False) == "alone"
-    assert _tag(2, [], True) == "combined only"
-    assert _tag(2, ["a"], True) == "both"
-    assert _tag(2, ["a"], False) == "alone only"
+    assert tag(1, ["a"], False) == "alone"
+    assert tag(2, [], True) == "combined only"
+    assert tag(2, ["a"], True) == "both"
+    assert tag(2, ["a"], False) == "alone only"
 
 
 def test_receivers_that_refuse_recording_programs_are_skipped():
@@ -147,21 +148,224 @@ class _Proc:
         return -9
 
 
-def test_watch_stops_receivers_that_end_the_session_or_never_send(tmp_path, capsys):
-    talking, silent, cut = (Receiver(h) for h in ("talks.example", "silent.example", "cut.example"))
+def test_watch_stops_receivers_that_end_the_session_or_stop_sending(tmp_path, capsys):
+    names = ("talks.example", "silent.example", "stalls.example", "cut.example")
+    talking, silent, stalled, cut = (Receiver(h) for h in names)
     ended = ("INFO cut.example:8073 server closed the connection cleanly. "
              "Reconnecting after 5 seconds.")
-    for rx, wav, log in ((talking, 100_000, "Block: 1"), (silent, 44, ""), (cut, 100_000, ended)):
+    for rx, wav, log in ((talking, 100_000, "Block: 1"), (silent, 44, ""),
+                         (stalled, 100_000, "Block: 9"), (cut, 100_000, ended)):
         (tmp_path / rx.label).mkdir()
         (tmp_path / rx.label / "x_iq.wav").write_bytes(bytes(wav))
         (tmp_path / rx.label / "kiwirecorder.log").write_text(log)
-    procs = {rx: _Proc() for rx in (talking, silent, cut)}
-    _watch(procs, tmp_path, time.time() - 60, time.time() + 0.3, poll=0.05)
-    assert [procs[rx].killed for rx in (talking, silent, cut)] == [False, True, True]
+    procs = {rx: _Proc() for rx in (talking, silent, stalled, cut)}
+    done = threading.Event()
+
+    def stream():
+        while not done.is_set():
+            with open(tmp_path / talking.label / "x_iq.wav", "ab") as f:
+                f.write(bytes(4800))
+            time.sleep(0.02)
+
+    feeder = threading.Thread(target=stream)
+    feeder.start()
+    try:
+        _watch(procs, tmp_path, time.time() - 60, time.time() + 0.6, poll=0.05, quiet=0.3)
+    finally:
+        done.set()
+        feeder.join()
+    assert [procs[rx].killed for rx in (talking, silent, stalled, cut)] == [False, True, True, True]
     err = capsys.readouterr().err
     assert "silent.example:8073 connected but sent nothing" in err
+    assert "stalls.example:8073 stopped sending samples after 1 min" in err
     assert "cut.example:8073: server closed the connection cleanly after 1 min" in err
-    assert "not reconnecting" in err
+
+
+T0 = 1_000_000.0
+
+
+class Clock:
+    """Stands in for the time module inside _kiwi; sleep() moves time and runs scripted events."""
+
+    def __init__(self):
+        self.now = T0
+        self.events = []
+
+    def time(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+        due = [e for e in self.events if e[0] <= self.now]
+        self.events = [e for e in self.events if e[0] > self.now]
+        for _, fn in sorted(due, key=lambda e: e[0]):
+            fn()
+
+    def at(self, offset, fn):
+        self.events.append((T0 + offset, fn))
+
+
+class Proc:
+    def __init__(self, clock, exits_at=None, code=0):
+        self.clock, self.exits_at, self.code = clock, exits_at, code
+        self.killed = False
+        self.returncode = None
+
+    def poll(self):
+        if self.killed:
+            self.returncode = -9
+        elif self.exits_at is not None and self.clock.now >= T0 + self.exits_at:
+            self.returncode = self.code
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self):
+        return self.returncode
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    c = Clock()
+    monkeypatch.setattr(_kiwi, "time", c)
+    return c
+
+
+def recorder(tmp_path, host, wav=0, log=""):
+    rx = Receiver(host)
+    d = tmp_path / rx.label
+    d.mkdir()
+    (d / "kiwirecorder.log").write_text(log)
+    if wav:
+        (d / "x_iq.wav").write_bytes(bytes(wav))
+    return rx, d / "x_iq.wav"
+
+
+def grow(clock, wav, seconds):
+    """One 2 KB block per second at each of the given offsets."""
+    for s in seconds:
+        clock.at(s, lambda: wav.write_bytes(wav.read_bytes() + bytes(2066)))
+
+
+CUT = "pid 1 cut.example:8073 server closed the connection cleanly. Reconnecting after 5 seconds."
+
+
+def test_every_dropped_recorder_is_reported_once_and_none_as_quitting(tmp_path, clock):
+    cut, _ = recorder(tmp_path, "cut.example", 100_000, CUT)
+    silent, _ = recorder(tmp_path, "silent.example", 44)
+    live, wav = recorder(tmp_path, "live.example", 100_000, "Block: 1")
+    grow(clock, wav, range(1, 40))
+    procs = {rx: Proc(clock) for rx in (cut, silent, live)}
+    msgs = []
+    _watch(procs, tmp_path, T0, T0 + 40, poll=1.0, log=msgs.append, quiet=5.0, end=T0 + 120)
+    assert [m.split()[0] for m in msgs] == ["cut.example:8073:", "silent.example:8073"]
+    assert [procs[rx].killed for rx in (cut, silent, live)] == [True, True, False]
+
+
+def test_a_recorder_that_quits_early_is_reported_once_while_others_keep_going(tmp_path, clock):
+    early, _ = recorder(tmp_path, "early.example", 100_000, "Block: 1")
+    live, wav = recorder(tmp_path, "live.example", 100_000, "Block: 1")
+    grow(clock, wav, range(1, 30))
+    grow(clock, tmp_path / early.label / "x_iq.wav", range(1, 10))
+    procs = {early: Proc(clock, exits_at=10, code=3), live: Proc(clock)}
+    msgs = []
+    _watch(procs, tmp_path, T0, T0 + 30, poll=1.0, log=msgs.append, quiet=5.0, end=T0 + 120)
+    assert len(msgs) == 1
+    assert msgs[0].startswith("early.example:8073 stopped by itself after 10 s (exit 3)")
+
+
+def test_a_pause_shorter_than_quiet_is_not_a_stall(tmp_path, clock):
+    rx, wav = recorder(tmp_path, "pauses.example", 44, "Block: 1")
+    grow(clock, wav, [*range(1, 11), *range(25, 41)])
+    msgs = []
+    p = Proc(clock)
+    _watch({rx: p}, tmp_path, T0, T0 + 40, poll=1.0, log=msgs.append, quiet=20.0)
+    assert not p.killed and msgs == []
+
+
+def test_a_stall_is_dropped_quiet_after_the_last_data_and_says_when_it_stopped(tmp_path, clock):
+    rx, wav = recorder(tmp_path, "stalls.example", 44, "Block: 1")
+    grow(clock, wav, range(1, 11))
+    msgs = []
+    p = Proc(clock)
+    _watch({rx: p}, tmp_path, T0, T0 + 100, poll=1.0, log=msgs.append, quiet=20.0)
+    assert p.killed
+    assert 30 <= clock.now - T0 <= 32
+    assert msgs[0].startswith("stalls.example:8073 stopped sending samples after 10 s,")
+
+
+def test_stop_ends_the_watch_at_the_next_poll(tmp_path, clock):
+    rx, wav = recorder(tmp_path, "ok.example", 44, "Block: 1")
+    grow(clock, wav, range(1, 100))
+    ev = threading.Event()
+    clock.at(3, ev.set)
+    msgs = []
+    p = Proc(clock)
+    _watch({rx: p}, tmp_path, T0, T0 + 100, poll=1.0, log=msgs.append, stop=ev, end=T0 + 90)
+    assert clock.now - T0 <= 4 and not p.killed and msgs == []
+
+
+def test_the_watch_ends_when_every_recorder_has_exited(tmp_path, clock):
+    a, _ = recorder(tmp_path, "a.example", 100_000, "Block: 1")
+    b, _ = recorder(tmp_path, "b.example", 100_000, "Block: 1")
+    procs = {a: Proc(clock, exits_at=2), b: Proc(clock, exits_at=3)}
+    _watch(procs, tmp_path, T0, T0 + 100, poll=1.0, log=lambda m: None, end=T0 + 4)
+    assert clock.now - T0 <= 5
+
+
+def test_an_exit_between_the_poll_and_the_final_check_is_still_reported(tmp_path, clock):
+    class Late(Proc):
+        calls = 0
+
+        def poll(self):
+            self.calls += 1
+            if self.calls > 1:
+                self.returncode = 7
+            return self.returncode
+
+    rx, _ = recorder(tmp_path, "late.example", 100_000, "Block: 1")
+    msgs = []
+    _watch({rx: Late(clock)}, tmp_path, T0 - 70, T0 + 100, poll=1.0, log=msgs.append, end=T0 + 50)
+    assert len(msgs) == 1 and "stopped by itself" in msgs[0]
+
+
+def test_record_reports_a_recorder_that_quits_on_its_own(tmp_path):
+    tool = tmp_path / "krec.py"
+    tool.write_text("import sys\nsys.exit(3)\n")
+    msgs = []
+    record([Receiver("quits.example")], 14097.1, 1, tmp_path / "w", tool, log=msgs.append,
+           start=time.time() + 0.2)
+    assert any("quits.example:8073 stopped by itself" in m and "(exit 3)" in m for m in msgs)
+
+
+def test_record_returns_soon_after_stop_is_set(tmp_path):
+    tool = tmp_path / "krec.py"
+    tool.write_text("import time\ntime.sleep(60)\n")
+    ev = threading.Event()
+    threading.Timer(0.5, ev.set).start()
+    began = time.time()
+    record([Receiver("slow.example")], 14097.1, 1, tmp_path / "w", tool, stop=ev,
+           start=began + 0.1)
+    assert time.time() - began < 5
+
+
+def test_a_stop_during_the_countdown_starts_no_recorder(tmp_path):
+    tool = tmp_path / "krec.py"
+    tool.write_text("import time\ntime.sleep(60)\n")
+    ev = threading.Event()
+    ev.set()
+    assert record([Receiver("slow.example")], 14097.1, 1, tmp_path / "w", tool, stop=ev,
+                  start=time.time() + 30) == {}
+    assert not (tmp_path / "w").exists()
+
+
+def test_a_recorder_that_never_wrote_is_not_also_called_a_short_recording(tmp_path, clock):
+    rx, _ = recorder(tmp_path, "nothing.example", 0, "boom")
+    msgs = []
+    _watch({rx: Proc(clock, exits_at=0, code=1)}, tmp_path, T0, T0 + 100, poll=1.0,
+           log=msgs.append, end=T0 + 60)
+    assert len(msgs) == 1 and "short" not in msgs[0] and "recorded nothing" in msgs[0]
 
 
 def test_recorder_logs_session_ends_and_gives_up_on_a_full_receiver(tmp_path, monkeypatch):

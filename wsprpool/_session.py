@@ -7,7 +7,7 @@ import re
 import sys
 import tomllib
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,7 +76,11 @@ class Stream:
         return self.start + len(self.x) / self.rate
 
 
-def load(path: Path) -> tuple[float, list[Stream]]:
+def _stderr(text: str) -> None:
+    print(text, file=sys.stderr)
+
+
+def load(path: Path, log: Callable[[str], None] = _stderr) -> tuple[float, list[Stream]]:
     """Read a recording session: its frequency and each receiver's 375 Hz baseband."""
     with zipfile.ZipFile(path) as z:
         head = tomllib.loads(_entry(z, "londopy.toml").decode())
@@ -94,7 +98,7 @@ def load(path: Path) -> tuple[float, list[Stream]]:
             try:
                 t0, rate = timebase(wav, approx)
             except ValueError as e:
-                print(f"skipping {r['label']}: {e}", file=sys.stderr)
+                log(f"skipping {r['label']}: {e}")
                 continue
             streams.append(Stream(r["label"], t0, *baseband(wav.iq, rate)))
     if not streams:

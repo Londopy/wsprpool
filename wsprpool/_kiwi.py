@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import re
 import struct
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
+from collections.abc import Callable
+from urllib.error import URLError
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +46,49 @@ def status(rx: Receiver, timeout: float = 10.0) -> dict[str, str]:
     return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
 
 
+# the public receiver list the KiwiSDR map tools use, generated from kiwisdr.com/public
+LIST_URL = "http://rx.linkfanel.net/kiwisdr_com.js"
+
+
+def parse_list(text: str) -> list[dict[str, str]]:
+    """The receivers in kiwisdr_com.js, a JavaScript array with trailing commas."""
+    start, end = text.find("["), text.rfind("]")
+    if start < 0 or end < start:
+        raise ValueError("the public receiver list isn't a JavaScript array any more")
+    return json.loads(re.sub(r",\s*([\]}])", r"\1", text[start: end + 1]))
+
+
+def public_receivers(timeout: float = 30.0) -> list[dict[str, str]]:
+    req = urllib.request.Request(LIST_URL, headers={"User-Agent": "wsprpool"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return parse_list(r.read().decode("utf-8", "replace"))
+
+
+def _stderr(text: str) -> None:
+    print(text, file=sys.stderr)
+
+
+def next_start(now: float) -> float:
+    """When recording starts: 8 seconds before the next even minute, at least 2 s away."""
+    start = (now // 120 + 1) * 120 - 8
+    return start + 120 if start - now < 2 else start
+
+
+def usable(receivers: list[Receiver], log: Callable[[str], None] = _stderr) -> list[Receiver]:
+    """The receivers whose /status says they can record now, each once; the rest are logged."""
+    ok = []
+    for rx in dict.fromkeys(receivers):
+        try:
+            why = unusable(status(rx))
+        except (URLError, OSError, ValueError) as e:
+            why = f"status check failed: {e}"
+        if why:
+            log(f"skipping {rx.host}:{rx.port}: {why}")
+        else:
+            ok.append(rx)
+    return ok
+
+
 def unusable(st: dict[str, str]) -> str | None:
     """Why a receiver can't be used right now, or None if it can."""
     if st.get("offline") == "yes" or st.get("status", "active") != "active":
@@ -69,55 +116,85 @@ def _stop(p: subprocess.Popen) -> None:
         p.wait()
 
 
+def _span(seconds: float) -> str:
+    return f"{seconds / 60:.0f} min" if seconds >= 60 else f"{seconds:.0f} s"
+
+
 def _watch(procs: dict[Receiver, subprocess.Popen], out: Path, start: float,
-           deadline: float, poll: float = 1.0) -> None:
-    """Wait for the recorders, stopping any the receiver has cut off or never served.
+           deadline: float, poll: float = 1.0, log: Callable[[str], None] = _stderr,
+           stop: threading.Event | None = None, quiet: float = SILENT_AFTER,
+           end: float | None = None) -> None:
+    """Wait for the recorders, stopping any the receiver has cut off or stopped feeding.
 
     A receiver ends the session at its owner's time limit, and kiwiclient would quietly
     reconnect and carry on past it. Some owners also limit recording programs in ways
-    /status doesn't show: the receiver takes the connection and then sends nothing. Both
-    are stopped here, so the owner's rules hold and no slot is held for nothing.
+    /status doesn't show: the receiver keeps the connection but sends nothing, from the
+    start or after a few seconds. Both are stopped here, so the owner's rules hold and no
+    slot is held for nothing. A recorder that exits well before end is reported, since a
+    short recording otherwise looks like a whole one.
     """
-    silent_checked = False
-    while time.time() < deadline and any(p.poll() is None for p in procs.values()):
+    sizes: dict[Receiver, int] = {}
+    gone: set[Receiver] = set()
+    grew = {rx: time.time() for rx in procs}
+    while True:
         for rx, p in procs.items():
+            size = max((w.stat().st_size for w in (out / rx.label).glob("*.wav")
+                        if w.stat().st_mtime >= start - 30), default=0)
             if p.poll() is not None:
+                if rx not in gone and end is not None and time.time() < end - 30:
+                    what = "so its recording is short" if size else "and recorded nothing"
+                    log(f"{rx.host}:{rx.port} stopped by itself after "
+                        f"{_span(time.time() - start)} (exit {p.returncode}), {what}; "
+                        f"{out / rx.label / 'kiwirecorder.log'} may say why")
+                gone.add(rx)
                 continue
-            log = (out / rx.label / "kiwirecorder.log").read_text(errors="replace")
-            ended = next((line for line in log.splitlines() if ENDED in line), None)
+            text = (out / rx.label / "kiwirecorder.log").read_text(errors="replace")
+            ended = next((line for line in text.splitlines() if ENDED in line), None)
             if ended:
                 _stop(p)
-                held = time.time() - start
+                gone.add(rx)
                 reason = ended.split(ENDED)[0].rstrip(" .").rsplit(f"{rx.port} ", 1)[-1]
-                print(f"{rx.host}:{rx.port}: {reason} after "
-                      + (f"{held / 60:.0f} min" if held >= 60 else f"{held:.0f} s")
-                      + "; keeping what was recorded and not reconnecting, since this is "
-                      "usually the owner's time limit", file=sys.stderr)
-        if not silent_checked and time.time() >= start + SILENT_AFTER:
-            silent_checked = True
-            for rx, p in procs.items():
-                fresh = [w for w in (out / rx.label).glob("*.wav")
-                         if w.stat().st_mtime >= start - 30]
-                if p.poll() is None and not any(w.stat().st_size > 4096 for w in fresh):
-                    _stop(p)
-                    print(f"{rx.host}:{rx.port} connected but sent nothing in "
-                          f"{SILENT_AFTER:.0f} s, so it was dropped; its owner may limit "
-                          "recording programs", file=sys.stderr)
+                log(f"{rx.host}:{rx.port}: {reason} after {_span(time.time() - start)}; keeping "
+                    "what was recorded and not reconnecting, since the owner's time limit is "
+                    "the usual reason")
+                continue
+            if size != sizes.get(rx):
+                sizes[rx], grew[rx] = size, time.time()
+            elif time.time() - grew[rx] >= quiet:
+                _stop(p)
+                gone.add(rx)
+                if size > 4096:
+                    log(f"{rx.host}:{rx.port} stopped sending samples after "
+                        f"{_span(grew[rx] - start)}, so it was dropped and what it sent was "
+                        "kept; its owner may limit recording programs")
+                else:
+                    log(f"{rx.host}:{rx.port} connected but sent nothing in {quiet:.0f} s, "
+                        "so it was dropped; its owner may limit recording programs")
+        if (time.time() >= deadline or len(gone) == len(procs)
+                or (stop is not None and stop.is_set())):
+            return
         time.sleep(poll)
 
 
 def record(
-    receivers: list[Receiver], freq_khz: float, minutes: int, out: Path, kiwirecorder: Path
+    receivers: list[Receiver], freq_khz: float, minutes: int, out: Path, kiwirecorder: Path,
+    log: Callable[[str], None] = _stderr, stop: threading.Event | None = None,
+    start: float | None = None,
 ) -> dict[Receiver, Path]:
     """Record every receiver at once, starting just before the next even minute.
 
     Returns the wav file each receiver produced; receivers that failed are left out.
+    Setting stop ends the recording early and keeps what was recorded. start overrides
+    when recording begins, for a caller that has already shown it to someone.
     """
+    receivers = list(dict.fromkeys(receivers))
     now = time.time()
-    start = (now // 120 + 1) * 120 - 8
-    if start - now < 2:
-        start += 120
-    time.sleep(start - now)
+    if start is None:
+        start = next_start(now)
+    if stop is None:
+        time.sleep(start - now)
+    elif stop.wait(start - now):
+        return {}
     procs = {}
     deadline = start + minutes * 60 + 120
     try:
@@ -152,9 +229,9 @@ def record(
                 "info",
             ]
             # kiwirecorder logs every GPS block; a pipe nobody reads fills up and stalls it
-            with open(d / "kiwirecorder.log", "w") as log:
-                procs[rx] = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
-        _watch(procs, out, start, deadline)
+            with open(d / "kiwirecorder.log", "w") as handle:
+                procs[rx] = subprocess.Popen(cmd, stdout=handle, stderr=subprocess.STDOUT)
+        _watch(procs, out, start, deadline, log=log, stop=stop, end=start + minutes * 60)
     finally:
         # a stuck connection still holds one of the owner's few slots
         for p in procs.values():
@@ -169,10 +246,7 @@ def record(
         else:
             log_text = (out / rx.label / "kiwirecorder.log").read_text(errors="replace")
             tail = " | ".join(log_text.strip().splitlines()[-3:])
-            print(
-                f"{rx.host}:{rx.port} recorded nothing (exit {p.returncode}): {tail}",
-                file=sys.stderr,
-            )
+            log(f"{rx.host}:{rx.port} recorded nothing (exit {p.returncode}): {tail}")
     return files
 
 
