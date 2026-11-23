@@ -151,6 +151,13 @@ def cmd_decode(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ui(a: argparse.Namespace) -> int:
+    from ._ui import serve
+
+    serve(a.port, a.browser, a.dir)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="wsprpool", description="Decode WSPR by pooling the soft "
                                 "decisions of several KiwiSDRs.")
@@ -184,6 +191,14 @@ def main(argv: list[str] | None = None) -> int:
                    help="skip looking spots up on wspr.live")
     d.add_argument("--csv", type=Path, help="also write the spots to this CSV file")
     d.set_defaults(fn=cmd_decode)
+
+    u = sub.add_parser("ui", help="pick receivers, record, decode and simulate in your browser")
+    u.add_argument("--port", type=int, default=0, help="port on 127.0.0.1 (default: any free one)")
+    u.add_argument("--dir", type=Path, default=None,
+                   help="folder for session files (default: the current one)")
+    u.add_argument("--no-browser", dest="browser", action="store_false",
+                   help="print the address instead of opening a browser")
+    u.set_defaults(fn=cmd_ui)
 
     a = p.parse_args(argv)
     try:

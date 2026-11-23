@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Record WSPR from several KiwiSDRs, decode the combination and simulate the gain.">
+<meta name="color-scheme" content="light dark">
+<title>wsprpool</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1 12 4 4 7 12 10 4 13 12' fill='none' stroke='%23d98a0b' stroke-width='2'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="mark" aria-hidden="true">/\/\</span>
+    <span class="name">wsprpool</span>
+  </div>
+  <div class="clock" aria-live="off">
+    <span id="utc">--:--:-- UTC</span>
+    <span id="slot">next slot in --</span>
+    <a href="https://github.com/Londopy/wsprpool#readme" rel="noreferrer" target="_blank">how it works</a>
+  </div>
+</header>
+
+<nav class="tabs" aria-label="Sections">
+  <button type="button" data-tab="record" aria-controls="record" aria-current="page">Receivers &amp; record</button>
+  <button type="button" data-tab="decode" aria-controls="decode">Decode</button>
+  <button type="button" data-tab="sim" aria-controls="sim">Simulate</button>
+</nav>
+
+<p id="fatal" class="banner error" role="alert" hidden></p>
+
+<main>
+<section id="record" class="tab" aria-labelledby="record-h">
+  <h1 id="record-h" class="visually-hidden">Receivers and recording</h1>
+  <div class="split">
+    <div class="pane">
+      <div class="pane-head">
+        <h2>KiwiSDRs</h2>
+        <div class="regions" role="group" aria-label="Map region">
+          <button type="button" data-region="world" aria-pressed="true">World</button>
+          <button type="button" data-region="americas" aria-pressed="false">Americas</button>
+          <button type="button" data-region="europe" aria-pressed="false">Europe</button>
+          <button type="button" data-region="asia" aria-pressed="false">Asia &amp; Pacific</button>
+        </div>
+      </div>
+      <svg id="map" viewBox="0 0 360 180" role="img" aria-labelledby="map-label">
+        <title id="map-label">Receivers on the Maidenhead grid. Use the list below to pick them by keyboard.</title>
+      </svg>
+      <p class="legend"><span><span class="dot ok"></span> can record</span> <span><span class="dot no"></span> can't record right now</span> <span><span class="dot sel"></span> picked</span></p>
+
+      <a class="skip" href="#rec-form">Skip the list to the recording settings</a>
+      <div class="filters">
+        <label>Search <input id="rx-search" type="search" placeholder="call, place or grid" autocomplete="off" spellcheck="false"></label>
+        <label class="check"><input id="rx-usable" type="checkbox" checked> Only receivers that can record now</label>
+        <label class="check"><input id="rx-nolimit" type="checkbox"> No time limit only</label>
+        <button type="button" id="rx-refresh" class="quiet">Refresh list</button>
+      </div>
+      <p id="rx-state" class="state" role="status">Loading the receiver list</p>
+      <div class="table-wrap" id="rx-wrap" hidden>
+        <table id="rx-table">
+          <caption class="visually-hidden">Public KiwiSDRs</caption>
+          <thead><tr>
+            <th scope="col"><span class="visually-hidden">Pick</span></th>
+            <th scope="col">Where</th><th scope="col">Grid</th><th scope="col">Users</th>
+            <th scope="col">Time limit</th><th scope="col">Status</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="pane side">
+      <h2>Record a session</h2>
+      <p class="note">Each KiwiSDR serves only a few listeners and its owner pays for it. Keep sessions short. wsprpool stops a receiver at its owner's time limit and never reconnects past it.</p>
+      <form id="rec-form" novalidate tabindex="-1">
+        <fieldset>
+          <legend>Picked receivers <span id="rec-count" class="count">0</span></legend>
+          <ul id="rec-picked" class="picked"></ul>
+        </fieldset>
+        <div class="grid2">
+          <label>Frequency, kHz <input id="rec-freq" type="number" step="0.1" min="10" max="30000" value="14097.1" required></label>
+          <label>Minutes <input id="rec-minutes" type="number" min="2" max="60" step="2" value="10" required></label>
+        </div>
+        <label>Save as <input id="rec-output" type="text" autocomplete="off" spellcheck="false"></label>
+        <label>kiwirecorder.py <input id="rec-tool" type="text" placeholder="C:\path\to\kiwiclient\kiwirecorder.py" autocomplete="off" spellcheck="false"></label>
+        <p id="rec-plan" class="plan" hidden></p>
+        <div class="actions">
+          <button type="submit" id="rec-start" class="primary">Start recording</button>
+          <button type="button" id="rec-stop" disabled>Stop</button>
+        </div>
+      </form>
+      <div id="rec-status" class="status" role="status" aria-live="polite"></div>
+      <p id="rec-clock" class="clockline"></p>
+      <div id="rec-progress" class="meter" hidden><div class="fill"></div></div>
+      <ul id="rec-rx" class="rx-progress"></ul>
+      <ol id="rec-log" class="log"></ol>
+      <p id="rec-done" hidden><button type="button" id="rec-decode" class="primary">Decode this session</button></p>
+    </div>
+  </div>
+</section>
+
+<section id="decode" class="tab" aria-labelledby="decode-h" hidden>
+  <h1 id="decode-h" class="visually-hidden">Decode a session</h1>
+  <form id="dec-form" class="row-form" novalidate>
+    <label class="grow">Session file <input id="dec-path" type="text" list="dec-sessions" autocomplete="off" spellcheck="false" required></label>
+    <datalist id="dec-sessions"></datalist>
+    <label class="check"><input id="dec-check" type="checkbox" checked> Check spots on wspr.live</label>
+    <button type="submit" id="dec-start" class="primary">Decode</button>
+    <button type="button" id="dec-stop" disabled>Stop</button>
+  </form>
+  <p id="dec-hint" class="note"></p>
+  <div id="dec-status" class="status" role="status" aria-live="polite"></div>
+  <p id="dec-clock" class="clockline"></p>
+  <div id="dec-progress" class="meter" hidden><div class="fill"></div></div>
+  <ol id="dec-slots" class="slots"></ol>
+
+  <div id="dec-result" hidden>
+    <p id="dec-answer" class="answer"></p>
+    <dl id="dec-summary" class="summary"></dl>
+    <div class="table-tools">
+      <div role="group" aria-label="Show spots">
+        <button type="button" data-filter="all" data-label="All" aria-pressed="true">All</button>
+        <button type="button" data-filter="combined only" data-label="Combined only" aria-pressed="false">Combined only</button>
+        <button type="button" data-filter="both" data-label="Combined and alone" aria-pressed="false">Combined and alone</button>
+        <button type="button" data-filter="alone only" data-label="Alone only" aria-pressed="false">Alone only</button>
+      </div>
+      <button type="button" id="dec-csv" class="quiet">Save all as CSV</button>
+    </div>
+    <p id="dec-empty" class="state" hidden>No spots in this view.</p>
+    <div class="table-wrap" id="dec-table-wrap">
+      <table id="dec-table">
+        <caption class="visually-hidden">Decoded spots</caption>
+        <thead><tr>
+          <th scope="col">UTC</th><th scope="col" class="num">MHz</th><th scope="col" class="num">SNR</th>
+          <th scope="col" class="num">dt</th><th scope="col" class="num">Drift</th><th scope="col" class="num">Metric</th>
+          <th scope="col">Message</th><th scope="col">Found by</th><th scope="col">Receivers alone</th>
+          <th scope="col" class="num">wspr.live</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section id="sim" class="tab" aria-labelledby="sim-h" hidden>
+  <h1 id="sim-h" class="visually-hidden">Simulate the combining gain</h1>
+  <form id="sim-form" novalidate>
+    <div class="sim-form">
+      <label>Receiver counts <input id="sim-ns" type="text" value="1,2,4" inputmode="numeric" required></label>
+      <label>SNR from, dB <input id="sim-lo" type="number" value="-34" step="1"></label>
+      <label>SNR to, dB <input id="sim-hi" type="number" value="-27" step="1"></label>
+      <label>Slots per point <input id="sim-trials" type="number" value="10" min="1" max="200"></label>
+    </div>
+    <details class="more">
+      <summary>Channel and seed</summary>
+      <div class="sim-form">
+        <label>Fading spread, Hz <input id="sim-doppler" type="number" value="0" min="0" max="5" step="0.005"></label>
+        <label>Shared noise, 0 to 1 <input id="sim-shared" type="number" value="0" min="0" max="1" step="0.05"></label>
+        <label>Oscillator spread, Hz <input id="sim-spread" type="number" value="0.03" min="0" max="5" step="0.01"></label>
+        <label>Seed <input id="sim-seed" type="number" value="1" step="1"></label>
+      </div>
+    </details>
+    <div class="actions">
+      <button type="submit" id="sim-start" class="primary">Run</button>
+      <button type="button" id="sim-stop" disabled>Stop</button>
+    </div>
+  </form>
+  <p class="note">Every receiver hears the same message in its own noise. Each point decodes that many synthetic slots, so a run with many points and receivers takes minutes.</p>
+  <div id="sim-status" class="status" role="status" aria-live="polite"></div>
+  <div id="sim-progress" class="meter" hidden><div class="fill"></div></div>
+  <figure id="sim-figure" hidden>
+    <svg id="sim-chart" viewBox="0 0 640 320" role="img" aria-labelledby="sim-chart-t"><title id="sim-chart-t">Decode rate against SNR for each receiver count</title></svg>
+    <figcaption>Share of slots decoded at each SNR. The dashed line marks 50%, where the thresholds below are read.</figcaption>
+  </figure>
+  <div class="table-wrap" id="sim-table-wrap" hidden>
+    <table id="sim-table">
+      <caption class="visually-hidden">Thresholds and gains</caption>
+      <thead><tr><th scope="col">Receivers</th><th scope="col" class="num">50% threshold</th><th scope="col" class="num">Gain</th><th scope="col" class="num">Ideal</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+</main>
+</body>
+</html>
