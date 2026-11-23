@@ -37,9 +37,10 @@ dev = ["pytest", "ruff", "mypy"]
 [tool.hatch.build.targets.wheel]
 packages = ["wsprpool"]
 
-# CI files and the release script are for this repo, not for anyone building from the sdist
+# CI files, the release script and the README images are for this repo, not for anyone
+# building from the sdist
 [tool.hatch.build.targets.sdist]
-exclude = [".github/", "scripts/"]
+exclude = [".github/", "scripts/", "assets/"]
 
 [tool.ruff]
 line-length = 100
